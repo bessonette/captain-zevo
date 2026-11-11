@@ -19,7 +19,9 @@
 		"ghcr.io/devcontainers/features/node:1": {},
 		"ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {},
 		// Gives the container the host's Docker, for trying `zevo` against real containers.
-		"ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+		"ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+			"moby": false
+		}
 	},
 
 	// Use 'forwardPorts' to make a list of ports inside the container available locally.

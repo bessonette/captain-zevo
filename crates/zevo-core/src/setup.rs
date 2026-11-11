@@ -58,6 +58,8 @@ struct StaticConfig {
     file_single: bool,
     /// (name, container port)
     entrypoints: Vec<(String, u16)>,
+    /// A mounted static config file that could not be read from here.
+    unreadable: Option<PathBuf>,
 }
 
 fn inspect(c: &ContainerInfo) -> Candidate {
@@ -65,6 +67,25 @@ fn inspect(c: &ContainerInfo) -> Candidate {
     let mut problems = Vec::new();
     if !c.running {
         problems.push("the container is not running".to_string());
+    }
+    // Without the static config nothing below can be trusted, so say only that.
+    if let Some(path) = &config.unreadable
+        && (config.file_dir.is_none() || config.entrypoints.is_empty())
+    {
+        problems.push(format!(
+            "its config file {} cannot be read from here (Zevo may be running inside a \
+             container); run Zevo on the machine that hosts Traefik, or pass --dynamic-dir \
+             and --entrypoint",
+            path.display()
+        ));
+        return Candidate {
+            container: c.name.clone(),
+            running: c.running,
+            dynamic_dir: None,
+            entrypoint: None,
+            http_port: None,
+            problems,
+        };
     }
 
     let dynamic_dir = match &config.file_dir {
@@ -140,10 +161,13 @@ fn static_config(c: &ContainerInfo) -> StaticConfig {
         "/etc/traefik/traefik.yaml",
         "/traefik.yml",
     ] {
-        if let Some(path) = host_path(c, candidate)
-            && let Ok(text) = std::fs::read_to_string(&path)
-        {
-            apply_yaml(&mut config, &text);
+        if let Some((mount_source, path)) = host_mount_path(c, candidate) {
+            match std::fs::read_to_string(&path) {
+                Ok(text) => apply_yaml(&mut config, &text),
+                // The mount is visible but holds no such file: try the next name.
+                Err(_) if mount_source.is_dir() => continue,
+                Err(_) => config.unreadable = Some(path),
+            }
             break;
         }
     }
@@ -241,17 +265,29 @@ fn apply_yaml(config: &mut StaticConfig, text: &str) {
 
 /// Maps a path inside the container to the host through its bind mounts.
 fn host_path(c: &ContainerInfo, container_path: &str) -> Option<PathBuf> {
+    host_mount_path(c, container_path).map(|(_, path)| path)
+}
+
+/// Like [`host_path`], also returning the host side of the mount used.
+fn host_mount_path(c: &ContainerInfo, container_path: &str) -> Option<(PathBuf, PathBuf)> {
     let wanted = Path::new(container_path);
     c.mounts
         .iter()
         .filter(|m| !m.source.is_empty())
         .filter_map(|m| {
             let rest = wanted.strip_prefix(&m.destination).ok()?;
-            Some((m.destination.len(), Path::new(&m.source).join(rest)))
+            let source = PathBuf::from(&m.source);
+            // Joining an empty remainder would add a trailing slash.
+            let path = if rest.as_os_str().is_empty() {
+                source.clone()
+            } else {
+                source.join(rest)
+            };
+            Some((m.destination.len(), source, path))
         })
         // The most specific mount wins.
-        .max_by_key(|(len, _)| *len)
-        .map(|(_, path)| path)
+        .max_by_key(|(len, _, _)| *len)
+        .map(|(_, source, path)| (source, path))
 }
 
 /// Records an existing Traefik in settings and joins it to the Zevo network.
@@ -474,6 +510,15 @@ mod tests {
         // Env overrides the file.
         c.env = vec!["TRAEFIK_PROVIDERS_FILE_DIRECTORY=/etc/traefik/routes".into()];
         assert_eq!(inspect(&c).dynamic_dir, Some(tmp.path().join("routes")));
+    }
+
+    #[test]
+    fn says_when_the_static_config_is_out_of_reach() {
+        let mut c = traefik(&["traefik"], Path::new("/nonexistent/host/dir"));
+        c.mounts[0].destination = "/etc/traefik/traefik.yml".into();
+        let found = inspect(&c);
+        assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
+        assert!(found.problems[0].contains("cannot be read from here"));
     }
 
     #[tokio::test]
