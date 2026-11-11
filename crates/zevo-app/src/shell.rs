@@ -162,17 +162,33 @@ fn needs_network(view: &ProjectView) -> bool {
         .any(|r| r.target == Target::Container)
 }
 
-fn status_tag(view: &ProjectView) -> Tag {
-    let tag = match view.status.state {
+/// Status pill: a tinted background and a coloured dot, with normal text so
+/// it stays readable in light and dark themes.
+fn status_pill(view: &ProjectView, cx: &App) -> Div {
+    let theme = cx.theme();
+    let (color, label) = match view.status.state {
         ContainerState::Running if view.status.attached || !needs_network(view) => {
-            Tag::success().child("Running")
+            (theme.success, "Running")
         }
-        ContainerState::Running => Tag::warning().child("Not attached"),
-        ContainerState::Stopped => Tag::secondary().child("Stopped"),
-        ContainerState::Missing => Tag::danger().child("No container"),
-        ContainerState::Unknown => Tag::secondary().child("Unknown"),
+        ContainerState::Running => (theme.warning, "Not attached"),
+        ContainerState::Stopped => (theme.muted_foreground, "Stopped"),
+        ContainerState::Missing => (theme.danger, "No container"),
+        ContainerState::Unknown => (theme.muted_foreground, "Unknown"),
     };
-    tag.small().rounded_full()
+    h_flex()
+        .flex_shrink_0()
+        .gap_1p5()
+        .px_2()
+        .py_0p5()
+        .rounded_full()
+        .border_1()
+        .border_color(color.opacity(0.45))
+        .bg(color.opacity(0.14))
+        .text_xs()
+        .font_medium()
+        .text_color(theme.foreground)
+        .child(div().size(px(6.)).rounded_full().bg(color))
+        .child(label)
 }
 
 /// Uppercase column or section caption.
@@ -475,7 +491,7 @@ impl Shell {
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.go(Page::Project(slug.clone()), cx)),
                     )
-                    .child(h_flex().w(px(118.)).child(status_tag(view)))
+                    .child(h_flex().w(px(118.)).child(status_pill(view, cx)))
                     .child(
                         v_flex()
                             .flex_1()
@@ -529,7 +545,7 @@ impl Shell {
                         .on_click(cx.listener(|this, _, _, cx| this.go(Page::Projects(None), cx))),
                 )
                 .child(p.name.clone())
-                .child(status_tag(view)),
+                .child(status_pill(view, cx)),
             h_flex()
                 .gap_2()
                 .child(

@@ -11,6 +11,7 @@ use crate::{Error, Result, devcontainer, traefik};
 /// devcontainer config or folder name, and a route for the first port found.
 /// Nothing is saved.
 pub fn draft(folder: &Path) -> Result<Project> {
+    let folder = &expand_home(folder);
     let path = std::fs::canonicalize(folder)
         .map_err(|e| Error::io(format!("cannot open {}", folder.display()), e))?;
     if !path.is_dir() {
@@ -42,6 +43,15 @@ pub fn draft(folder: &Path) -> Result<Project> {
         routes,
         tags: Vec::new(),
     })
+}
+
+/// Replaces a leading `~` with the user's home folder, as a shell would.
+fn expand_home(path: &Path) -> std::path::PathBuf {
+    let home = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
+    match (path.strip_prefix("~"), home) {
+        (Ok(rest), Some(home)) => home.join(rest),
+        _ => path.to_path_buf(),
+    }
 }
 
 fn validate(store: &Store, project: &Project) -> Result<()> {
@@ -144,6 +154,21 @@ mod tests {
         assert_eq!(p.name, "plain");
         assert!(p.routes.is_empty());
         assert!(draft(&tmp.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn expands_a_leading_tilde_only() {
+        let home = directories::BaseDirs::new()
+            .unwrap()
+            .home_dir()
+            .to_path_buf();
+        assert_eq!(expand_home(Path::new("~")), home);
+        assert_eq!(
+            expand_home(Path::new("~/code/shop")),
+            home.join("code/shop")
+        );
+        assert_eq!(expand_home(Path::new("/srv/~/x")), Path::new("/srv/~/x"));
+        assert_eq!(expand_home(Path::new("~other/x")), Path::new("~other/x"));
     }
 
     #[test]

@@ -5,7 +5,7 @@ mod shell;
 
 use std::sync::Arc;
 
-use gpui_kit::component::{Theme, TitleBar};
+use gpui_kit::component::{Theme, ThemeMode, TitleBar};
 use gpui_kit::*;
 
 use backend::{Backend, DemoBackend, SystemBackend};
@@ -60,13 +60,21 @@ fn main() {
             };
             gpui_kit::open_window(options, cx, |window, cx| {
                 window.set_window_title("Captain Zevo");
-                Theme::sync_system_appearance(Some(window), cx);
-                window
-                    .observe_window_appearance(|window, cx| {
+                // ZEVO_THEME=light|dark overrides the system appearance.
+                match std::env::var("ZEVO_THEME").as_deref() {
+                    Ok("dark") => Theme::change(ThemeMode::Dark, Some(window), cx),
+                    Ok("light") => Theme::change(ThemeMode::Light, Some(window), cx),
+                    _ => {
                         Theme::sync_system_appearance(Some(window), cx);
-                        Theme::update(cx, |theme| theme.font_size = px(14.));
-                    })
-                    .detach();
+                        window
+                            .observe_window_appearance(|window, cx| {
+                                Theme::sync_system_appearance(Some(window), cx);
+                                Theme::update(cx, |theme| theme.font_size = px(14.));
+                            })
+                            .detach();
+                    }
+                }
+                Theme::update(cx, |theme| theme.font_size = px(14.));
                 cx.new(|cx| shell::Shell::new(backend, demo, window, cx))
             })
             .expect("failed to open the main window");
