@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Captain Zevo">
+  <!-- A mess tray seen from above: every project in its own compartment. -->
+  <rect x="3" y="9" width="58" height="46" rx="9" fill="#2f3b2c"/>
+  <rect x="5" y="11" width="54" height="42" rx="7" fill="#55654a"/>
+  <g fill="#2f3b2c">
+    <rect x="9" y="15" width="14" height="14" rx="3"/>
+    <rect x="25" y="15" width="14" height="14" rx="3"/>
+    <rect x="9" y="31" width="22" height="18" rx="3"/>
+    <rect x="33" y="31" width="22" height="18" rx="3"/>
+  </g>
+  <rect x="41" y="15" width="14" height="14" rx="3" fill="#d6252b"/>
+  <polygon points="48.00,16.80 49.29,20.22 52.95,20.39 50.09,22.68 51.06,26.21 48.00,24.20 44.94,26.21 45.91,22.68 43.05,20.39 46.71,20.22" fill="#ffffff"/>
+</svg>

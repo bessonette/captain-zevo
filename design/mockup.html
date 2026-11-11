@@ -1,0 +1,319 @@
+<title>Captain Zevo UI Mockup</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a review strip on top, then one app window: fixed sidebar, dense table, tabbed detail. */
+:root{
+  --bg:#eef1f4; --window:#fbfcfd; --panel:#f3f5f8; --line:#d9dfe6; --line-soft:#e6eaef;
+  --ink:#16202b; --ink-2:#4b5a6a; --ink-3:#7b8896;
+  --accent:#0f6e8c; --accent-ink:#ffffff; --accent-soft:#dcedf3;
+  --ok:#1f8a4c; --ok-soft:#dff2e6; --warn:#a86a00; --warn-soft:#fbeed3; --bad:#b93a32; --bad-soft:#fae1de; --idle:#6b7785; --idle-soft:#e7ebef;
+  --display:"Space Grotesk","Inter",system-ui,sans-serif;
+  --body:"Inter",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --r:6px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+    --bg:#0d1319; --window:#141c24; --panel:#19232d; --line:#2a3743; --line-soft:#212c37;
+    --ink:#e6edf3; --ink-2:#a7b4c0; --ink-3:#768594;
+    --accent:#4fb3d1; --accent-ink:#06222c; --accent-soft:#17323d;
+    --ok:#5fc98a; --ok-soft:#153324; --warn:#e0a94a; --warn-soft:#3a2c10; --bad:#ef8279; --bad-soft:#3d1b18; --idle:#93a0ad; --idle-soft:#232e39;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#0d1319; --window:#141c24; --panel:#19232d; --line:#2a3743; --line-soft:#212c37;
+  --ink:#e6edf3; --ink-2:#a7b4c0; --ink-3:#768594;
+  --accent:#4fb3d1; --accent-ink:#06222c; --accent-soft:#17323d;
+  --ok:#5fc98a; --ok-soft:#153324; --warn:#e0a94a; --warn-soft:#3a2c10; --bad:#ef8279; --bad-soft:#3d1b18; --idle:#93a0ad; --idle-soft:#232e39;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:13px/1.45 var(--body);
+  padding-block:20px 40px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.wrap{max-width:1180px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+button{font:inherit;color:inherit;cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.mono{font-family:var(--mono);font-size:12px}
+.muted{color:var(--ink-3)}
+
+/* review strip */
+.review{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;justify-content:space-between}
+.review h1{font:600 18px/1.2 var(--display);margin:0}
+.review p{margin:2px 0 0;color:var(--ink-2);max-width:62ch}
+.seg{display:flex;flex-wrap:wrap;gap:4px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:3px}
+.seg button{border:0;background:none;padding:5px 10px;border-radius:5px;color:var(--ink-2)}
+.seg button[aria-pressed="true"]{background:var(--window);color:var(--ink);box-shadow:0 0 0 1px var(--line)}
+
+/* window */
+.window{background:var(--window);border:1px solid var(--line);border-radius:10px;overflow:hidden;display:grid;grid-template-columns:200px minmax(0,1fr);min-height:640px;position:relative}
+.side{background:var(--panel);border-right:1px solid var(--line);padding:12px 8px;display:flex;flex-direction:column;gap:14px}
+.brand{font:600 14px var(--display);padding:2px 8px;display:flex;align-items:center;gap:8px}
+.brand i{width:18px;height:18px;border-radius:4px;background:var(--accent);display:inline-block;position:relative}
+.brand i::after{content:"";position:absolute;inset:4px 4px 8px;border:2px solid var(--accent-ink);border-bottom:0;border-radius:6px 6px 0 0}
+.nav{display:flex;flex-direction:column;gap:1px}
+.nav h2{font:500 10.5px var(--body);text-transform:uppercase;letter-spacing:.07em;color:var(--ink-3);margin:0;padding:4px 8px}
+.nav button{border:0;background:none;text-align:left;padding:5px 8px;border-radius:5px;display:flex;justify-content:space-between;gap:8px;color:var(--ink-2)}
+.nav button:hover{background:var(--line-soft)}
+.nav button[aria-current="true"]{background:var(--accent-soft);color:var(--ink);font-weight:500}
+.nav .n{color:var(--ink-3);font-variant-numeric:tabular-nums}
+.side .foot{margin-top:auto;padding:8px;border-top:1px solid var(--line);color:var(--ink-2);display:flex;flex-direction:column;gap:3px}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block;background:var(--idle);margin-right:6px}
+.dot.ok{background:var(--ok)} .dot.warn{background:var(--warn)} .dot.bad{background:var(--bad)}
+
+.main{display:flex;flex-direction:column;min-width:0}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line)}
+.bar h2{font:600 15px var(--display);margin:0;margin-right:auto;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.search{border:1px solid var(--line);background:var(--window);color:var(--ink);border-radius:var(--r);padding:5px 9px;font:inherit;width:190px;max-width:100%}
+.btn{border:1px solid var(--line);background:var(--window);border-radius:var(--r);padding:5px 10px;white-space:nowrap}
+.btn:hover{border-color:var(--ink-3)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:500}
+.btn.small{padding:2px 7px;font-size:12px}
+.btn.link{border:0;background:none;color:var(--accent);padding:0}
+.content{padding:0;flex:1;min-width:0}
+.pad{padding:16px;display:flex;flex-direction:column;gap:16px}
+
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;min-width:640px}
+th{font:500 10.5px var(--body);text-transform:uppercase;letter-spacing:.07em;color:var(--ink-3);text-align:left;padding:8px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:8px 12px;border-bottom:1px solid var(--line-soft);vertical-align:middle}
+th:first-child,td:first-child{padding-left:16px}
+tr.row{cursor:pointer}
+tr.row:hover td{background:var(--panel)}
+.name{font-weight:500}
+.pill{display:inline-flex;align-items:center;gap:5px;padding:1px 8px 1px 7px;border-radius:99px;font-size:11.5px;font-weight:500;white-space:nowrap;background:var(--idle-soft);color:var(--idle)}
+.pill::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.pill.ok{background:var(--ok-soft);color:var(--ok)} .pill.warn{background:var(--warn-soft);color:var(--warn)} .pill.bad{background:var(--bad-soft);color:var(--bad)}
+.url{color:var(--accent);text-decoration:none} .url:hover{text-decoration:underline}
+.chip{display:inline-block;border:1px solid var(--line);border-radius:4px;padding:0 5px;font-size:11px;color:var(--ink-2)}
+.acts{display:flex;gap:4px;justify-content:flex-end}
+
+.tabs{display:flex;gap:2px;padding:0 12px;border-bottom:1px solid var(--line);overflow-x:auto}
+.tabs button{border:0;background:none;padding:8px 10px;color:var(--ink-2);border-bottom:2px solid transparent;white-space:nowrap}
+.tabs button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--accent);font-weight:500}
+.kv{display:grid;grid-template-columns:120px minmax(0,1fr);gap:6px 14px;margin:0}
+.kv dt{color:var(--ink-3)} .kv dd{margin:0;overflow-wrap:anywhere}
+.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:20px}
+h3{font:600 13px var(--display);margin:0 0 8px}
+pre{margin:0;background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:12px;font:12px/1.55 var(--mono);overflow-x:auto;color:var(--ink)}
+pre .c{color:var(--ink-3)} pre .k{color:var(--accent)}
+.note{border:1px solid var(--line);border-left:3px solid var(--warn);background:var(--warn-soft);padding:8px 12px;border-radius:4px;color:var(--ink)}
+.note.bad{border-left-color:var(--bad);background:var(--bad-soft)}
+
+/* overlay: wizard and first run */
+.overlay{position:absolute;inset:0;background:color-mix(in srgb,var(--bg) 78%,transparent);display:flex;align-items:flex-start;justify-content:center;padding:36px 16px;overflow:auto}
+.sheet{background:var(--window);border:1px solid var(--line);border-radius:10px;width:min(600px,100%);box-shadow:0 12px 40px rgb(0 0 0/.18);display:flex;flex-direction:column}
+.sheet header{padding:14px 18px;border-bottom:1px solid var(--line)}
+.sheet header h2{font:600 15px var(--display);margin:0}
+.steps{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0 0;padding:0;list-style:none;color:var(--ink-3);font-size:12px}
+.steps li::after{content:"›";margin-left:6px}
+.steps li:last-child::after{content:""}
+.steps li[aria-current="step"]{color:var(--ink);font-weight:500}
+.sheet .body{padding:18px;display:flex;flex-direction:column;gap:14px;min-height:230px}
+.sheet footer{padding:12px 18px;border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:8px}
+.field{display:flex;flex-direction:column;gap:4px}
+.field label,.lbl{font-weight:500}
+.field input,.field select{border:1px solid var(--line);background:var(--window);color:var(--ink);border-radius:var(--r);padding:6px 9px;font:inherit;width:100%}
+.opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
+.opt{border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:var(--window);text-align:left;display:flex;flex-direction:column;gap:2px}
+.opt[aria-pressed="true"]{border-color:var(--accent);background:var(--accent-soft)}
+.opt b{font-weight:600}
+.opt span{color:var(--ink-2);font-size:12px}
+.routeline{display:grid;grid-template-columns:minmax(0,1fr) 80px auto;gap:8px;align-items:center}
+
+@media (max-width:760px){
+  .window{grid-template-columns:1fr}
+  .side{border-right:0;border-bottom:1px solid var(--line);gap:8px}
+  .nav{flex-direction:row;flex-wrap:wrap}
+  .nav h2,.side .foot{display:none}
+  .kv{grid-template-columns:1fr;gap:0 0}.kv dd{margin-bottom:6px}
+}
+</style>
+
+<div class="wrap">
+  <div class="review">
+    <div>
+      <h1>Captain Zevo UI mockup</h1>
+      <p>Clickable layout for review, with example projects. Click a project row, the sidebar, and the buttons; nothing here changes a real system.</p>
+    </div>
+    <div class="seg" role="group" aria-label="Jump to a screen">
+      <button data-jump="dash">Dashboard</button>
+      <button data-jump="detail">Project detail</button>
+      <button data-jump="wizard">Add project</button>
+      <button data-jump="first">First run</button>
+      <button data-jump="traefik">Traefik</button>
+      <button data-jump="hosts">Hosts</button>
+    </div>
+  </div>
+
+  <div class="window">
+    <aside class="side">
+      <div class="brand"><svg width="22" height="22" viewBox="0 0 64 64" aria-hidden="true"><rect x="3" y="9" width="58" height="46" rx="9" fill="#2f3b2c"/><rect x="5" y="11" width="54" height="42" rx="7" fill="#55654a"/><g fill="#2f3b2c"><rect x="9" y="15" width="14" height="14" rx="3"/><rect x="25" y="15" width="14" height="14" rx="3"/><rect x="9" y="31" width="22" height="18" rx="3"/><rect x="33" y="31" width="22" height="18" rx="3"/></g><rect x="41" y="15" width="14" height="14" rx="3" fill="#d6252b"/><polygon points="48.00,16.80 49.29,20.22 52.95,20.39 50.09,22.68 51.06,26.21 48.00,24.20 44.94,26.21 45.91,22.68 43.05,20.39 46.71,20.22" fill="#ffffff"/></svg>Captain Zevo</div>
+      <nav class="nav" id="nav"></nav>
+      <div class="foot">
+        <span><span class="dot ok"></span>Traefik running</span>
+        <span class="muted mono">traefik · web :80</span>
+      </div>
+    </aside>
+    <section class="main" id="main"></section>
+    <div class="overlay" id="overlay" hidden></div>
+  </div>
+</div>
+
+<script>
+const P=[
+ {slug:"shop",name:"Shop storefront",host:"local",kind:"compose",state:"running",ed:"VS Code",path:"~/code/shop",container:"shop-app-1",tags:["web"],routes:[{sub:"",port:3000},{sub:"api",port:8080,prefix:"/v1"}]},
+ {slug:"captain-zevo",name:"Captain Zevo",host:"local",kind:"image",state:"running",ed:"VS Code",path:"~/code/captain-zevo",container:"vsc-captain-zevo-4e1",tags:["rust"],routes:[]},
+ {slug:"docs",name:"Docs site",host:"local",kind:"dockerfile",state:"detached",ed:"Zed",path:"~/code/docs",container:"vsc-docs-91c",tags:["web"],routes:[{sub:"",port:4321}]},
+ {slug:"billing",name:"Billing service",host:"buildbox",kind:"compose",state:"running",ed:"Cursor",path:"/srv/dev/billing",container:"billing-api-1",tags:["api"],routes:[{sub:"",port:9000,addr:"buildbox.tail"}]},
+ {slug:"ml-lab",name:"ML lab",host:"gpu-01",kind:"image",state:"stopped",ed:"JetBrains",path:"/home/dev/ml-lab",container:"vsc-ml-lab-b07",tags:["python"],routes:[{sub:"",port:8888,addr:"gpu-01.tail"},{sub:"board",port:6006,addr:"gpu-01.tail"}]},
+ {slug:"legacy-crm",name:"Legacy CRM",host:"local",kind:"compose",state:"missing",ed:"VS Code",path:"~/code/legacy-crm",container:null,tags:[],routes:[{sub:"",port:8000}]},
+];
+const HOSTS=[{id:"local",label:"This machine",addr:"—",rt:"Docker Desktop 28.4",state:"ok",edge:"Traefik (adopted)"},
+ {id:"buildbox",label:"buildbox",addr:"buildbox.tail",rt:"Docker Engine 28.3",state:"ok",edge:"Published ports"},
+ {id:"gpu-01",label:"gpu-01",addr:"gpu-01.tail",rt:"Podman 5.6",state:"warn",edge:"Published ports"}];
+const ST={running:["ok","Running"],detached:["warn","Not attached"],stopped:["","Stopped"],missing:["bad","No container"]};
+const S={view:"dash",slug:"shop",tab:"overview",filter:"all",q:"",step:0,src:"folder",setup:"adopt"};
+const $=s=>document.querySelector(s), esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const host=(p,r)=>(r.sub?r.sub+".":"")+p.slug+".localhost";
+const url=(p,r)=>"http://"+host(p,r)+(r.prefix||"");
+const pill=s=>`<span class="pill ${ST[s][0]}">${ST[s][1]}</span>`;
+
+function nav(){
+  const c=h=>P.filter(p=>h==="all"||p.host===h).length;
+  const b=(view,label,n,filter)=>`<button data-view="${view}" ${filter?`data-filter="${filter}"`:""} aria-current="${S.view===view&&(!filter||S.filter===filter)||(view==="dash"&&S.view==="detail"&&filter==="all"&&S.filter==="all")}">${label}${n!=null?`<span class="n">${n}</span>`:""}</button>`;
+  $("#nav").innerHTML=`<h2>Projects</h2>${b("dash","All projects",c("all"),"all")}${HOSTS.map(h=>b("dash",h.label,c(h.id),h.id)).join("")}
+   <h2 style="margin-top:10px">System</h2>${b("traefik","Traefik")}${b("hosts","Hosts",HOSTS.length)}${b("settings","Settings")}`;
+}
+
+function dash(){
+  const rows=P.filter(p=>(S.filter==="all"||p.host===S.filter)&&(p.name+p.slug+p.tags.join()).toLowerCase().includes(S.q.toLowerCase()));
+  const title=S.filter==="all"?"All projects":HOSTS.find(h=>h.id===S.filter).label;
+  return `<div class="bar"><h2>${title}</h2><input class="search" id="q" type="search" placeholder="Search projects" value="${esc(S.q)}" aria-label="Search projects">
+   <button class="btn" data-act="discover">Discover</button><button class="btn primary" data-jump="wizard">Add project</button></div>
+  <div class="content scroll"><table><thead><tr><th>Status</th><th>Project</th><th>Address</th><th>Host</th><th>Type</th><th></th></tr></thead><tbody>
+  ${rows.map(p=>`<tr class="row" data-open="${p.slug}" tabindex="0"><td>${pill(p.state)}</td>
+   <td><div class="name">${esc(p.name)}</div><div class="muted mono">${p.slug}</div></td>
+   <td class="mono">${p.routes.length?p.routes.map(r=>`<div><a class="url" href="#" data-stop>${host(p,r)}${r.prefix||""}</a> <span class="muted">→ ${r.port}</span></div>`).join(""):`<span class="muted">no routes</span>`}</td>
+   <td>${p.host==="local"?"This machine":p.host}</td><td><span class="chip">${p.kind}</span></td>
+   <td><div class="acts"><button class="btn small" data-stop>${p.state==="running"||p.state==="detached"?"Stop":"Start"}</button><button class="btn small" data-stop>Open in ${p.ed}</button></div></td></tr>`).join("")
+   ||`<tr><td colspan="6" class="muted" style="padding:28px 16px">No projects match. Clear the search or add a project.</td></tr>`}
+  </tbody></table></div>`;
+}
+
+function yaml(p){
+  if(!p.routes.length) return `<span class="c"># managed by captain-zevo — do not edit; changes are overwritten</span>\n<span class="k">http</span>: {}`;
+  const n=r=>"zevo-"+p.slug+(r.sub?"-"+r.sub:"");
+  return `<span class="c"># managed by captain-zevo — do not edit; changes are overwritten</span>
+<span class="k">http</span>:
+  <span class="k">routers</span>:
+${p.routes.map(r=>`    <span class="k">${n(r)}</span>:
+      rule: Host(\`${host(p,r)}\`)${r.prefix?` && PathPrefix(\`${r.prefix}\`)`:""}
+      entryPoints: [web]
+      service: ${n(r)}`).join("\n")}
+  <span class="k">services</span>:
+${p.routes.map(r=>`    <span class="k">${n(r)}</span>:
+      loadBalancer:
+        servers:
+        - url: http://${r.addr||p.slug}:${r.port}`).join("\n")}`;
+}
+
+function detail(){
+  const p=P.find(x=>x.slug===S.slug), run=p.state==="running"||p.state==="detached";
+  const tabs=["overview","routes","logs","config"];
+  let body="";
+  if(S.tab==="overview") body=`
+   ${p.state==="detached"?`<div class="note">The container is running but is not on the <span class="mono">zevo</span> network, so its address will not respond. <button class="btn link">Attach now</button></div>`:""}
+   ${p.state==="missing"?`<div class="note bad">No container exists for this folder. Start the project, or open it in your editor to build it.</div>`:""}
+   <div class="cols"><div><h3>Project</h3><dl class="kv"><dt>Folder</dt><dd class="mono">${p.path}</dd><dt>Host</dt><dd>${p.host==="local"?"This machine":p.host}</dd><dt>Devcontainer</dt><dd>${p.kind}</dd><dt>Container</dt><dd class="mono">${p.container||"—"}</dd><dt>Editor</dt><dd>${p.ed}</dd><dt>Tags</dt><dd>${p.tags.map(t=>`<span class="chip">${t}</span>`).join(" ")||"—"}</dd></dl></div>
+   <div><h3>Addresses</h3>${p.routes.length?p.routes.map(r=>`<div class="mono" style="margin-bottom:6px"><a class="url" href="#">${url(p,r)}</a><br><span class="muted">→ ${r.addr?r.addr:"container"} port ${r.port}</span></div>`).join(""):`<p class="muted" style="margin:0">No routes yet. Add one on the Routes tab to give this project an address.</p>`}</div></div>`;
+  if(S.tab==="routes") body=`<div class="scroll"><table style="min-width:520px"><thead><tr><th>Address</th><th>Sends to</th><th>Port</th><th>Path</th><th></th></tr></thead><tbody>
+   ${p.routes.map(r=>`<tr><td class="mono">${host(p,r)}</td><td>${r.addr?`<span class="mono">${r.addr}</span>`:"Container (shared network)"}</td><td class="mono">${r.port}</td><td class="mono">${r.prefix||"/"}</td><td><div class="acts"><button class="btn small">Edit</button><button class="btn small">Remove</button></div></td></tr>`).join("")||`<tr><td colspan="5" class="muted">No routes yet.</td></tr>`}
+   </tbody></table></div><div><button class="btn">Add route</button></div>`;
+  if(S.tab==="logs") body=`<pre>${run?`<span class="c">12:04:11</span> ${p.container} started
+<span class="c">12:04:12</span> listening on 0.0.0.0:${p.routes[0]?.port||3000}
+<span class="c">12:04:19</span> GET / 200 14ms
+<span class="c">12:04:19</span> GET /assets/app.css 200 3ms
+<span class="c">12:05:02</span> GET /health 200 1ms`:`<span class="c">The container is not running, so there are no live logs.</span>`}</pre>`;
+  if(S.tab==="config") body=`<div><h3>Traefik file <span class="muted mono" style="font-weight:400">zevo-${p.slug}.yml</span></h3><pre>${yaml(p)}</pre></div>`;
+  return `<div class="bar"><h2><button class="btn link" data-view="dash">Projects</button><span class="muted">/</span>${esc(p.name)} ${pill(p.state)}</h2>
+   <button class="btn">${run?"Stop":"Start"}</button><button class="btn">Rebuild</button><button class="btn">Open in browser</button><button class="btn primary">Open in ${p.ed}</button></div>
+   <div class="tabs" role="tablist">${tabs.map(t=>`<button role="tab" data-tab="${t}" aria-selected="${S.tab===t}">${t[0].toUpperCase()+t.slice(1)}${t==="routes"?` (${p.routes.length})`:""}</button>`).join("")}</div>
+   <div class="content"><div class="pad">${body}</div></div>`;
+}
+
+function traefik(){
+  const rows=P.flatMap(p=>p.routes.map(r=>({h:host(p,r),own:p.slug,file:"zevo-"+p.slug+".yml"})));
+  rows.push({h:"grafana.localhost",own:null,file:"monitoring.yml"},{h:"traefik.localhost",own:null,file:"dashboard.yml"});
+  return `<div class="bar"><h2>Traefik <span class="pill ok">Running</span></h2><button class="btn">Run checks</button></div><div class="content"><div class="pad">
+   <dl class="kv"><dt>Container</dt><dd class="mono">traefik <span class="muted">(adopted, yours)</span></dd><dt>Routes folder</dt><dd class="mono">~/traefik/dynamic</dd><dt>Entrypoint</dt><dd class="mono">web · port 80</dd><dt>Network</dt><dd class="mono">zevo</dd></dl>
+   <div><h3>Routers</h3><div class="scroll"><table style="min-width:520px"><thead><tr><th>Address</th><th>Owner</th><th>File</th></tr></thead><tbody>
+   ${rows.map(r=>`<tr><td class="mono">${r.h}</td><td>${r.own?`<button class="btn link" data-open="${r.own}">${r.own}</button>`:`<span class="muted">Not managed by Zevo</span>`}</td><td class="mono muted">${r.file}</td></tr>`).join("")}
+   </tbody></table></div></div></div></div>`;
+}
+function hosts(){
+  return `<div class="bar"><h2>Hosts</h2><button class="btn primary">Add SSH host</button></div><div class="content scroll"><table><thead><tr><th>Status</th><th>Host</th><th>Address</th><th>Runtime</th><th>Routing</th><th>Projects</th></tr></thead><tbody>
+  ${HOSTS.map(h=>`<tr><td><span class="pill ${h.state}">${h.state==="ok"?"Connected":"Slow to respond"}</span></td><td class="name">${h.label}</td><td class="mono">${h.addr}</td><td>${h.rt}</td><td>${h.edge}</td><td>${P.filter(p=>p.host===h.id).length}</td></tr>`).join("")}
+  </tbody></table></div>`;
+}
+function settings(){
+  return `<div class="bar"><h2>Settings</h2></div><div class="content"><div class="pad" style="max-width:460px">
+   <div class="field"><label for="s-suffix">Domain suffix</label><input id="s-suffix" class="mono" value="localhost"><span class="muted">Projects are served at name.suffix.</span></div>
+   <div class="field"><label for="s-editor">Default editor</label><select id="s-editor"><option>VS Code</option><option>Cursor</option><option>Zed</option><option>JetBrains Gateway</option></select></div>
+   <div class="field"><label for="s-rt">Container runtime</label><select id="s-rt"><option>Detect automatically (Docker Desktop)</option><option>Podman</option><option>Custom socket…</option></select></div>
+   <div class="field"><span class="lbl">Registry files</span><span class="mono muted">~/.config/captain-zevo/projects/*.toml</span></div></div></div>`;
+}
+
+function wizard(){
+  const steps=["Source","Detected","Routes","Review"];
+  const src={folder:["Existing folder","A project already on disk"],clone:["Clone a repository","From a Git URL"],template:["New from template","Start with a devcontainer template"]};
+  const body=[
+   `<div class="opts">${Object.entries(src).map(([k,v])=>`<button class="opt" data-src="${k}" aria-pressed="${S.src===k}"><b>${v[0]}</b><span>${v[1]}</span></button>`).join("")}</div>
+    <div class="field"><label for="w-host">Host</label><select id="w-host">${HOSTS.map(h=>`<option>${h.label}</option>`).join("")}</select></div>
+    <div class="field"><label for="w-path">${S.src==="clone"?"Repository URL":S.src==="template"?"New folder":"Folder"}</label><input id="w-path" class="mono" value="${S.src==="clone"?"git@github.com:acme/inventory.git":"~/code/inventory"}"></div>`,
+   `<dl class="kv"><dt>Devcontainer</dt><dd>Compose, service <span class="mono">app</span></dd><dt>Config</dt><dd class="mono">.devcontainer/devcontainer.json</dd><dt>Ports found</dt><dd class="mono">5173, 5432</dd><dt>Container</dt><dd>Running as <span class="mono">inventory-app-1</span></dd></dl>
+    <div class="field"><label for="w-name">Name</label><input id="w-name" value="Inventory"></div>
+    <div class="field"><label for="w-slug">Short name (used in the address)</label><input id="w-slug" class="mono" value="inventory"></div>`,
+   `<span class="lbl">Addresses for this project</span>
+    <div class="routeline"><input class="search mono" style="width:100%" value="inventory.localhost" aria-label="Address"><input class="search mono" style="width:100%" value="5173" aria-label="Port"><button class="btn small">Remove</button></div>
+    <div><button class="btn">Add route</button></div>
+    <span class="muted">Port 5432 looks like a database, so it was not given an address.</span>`,
+   `<dl class="kv"><dt>Project</dt><dd>Inventory <span class="mono muted">inventory</span></dd><dt>Address</dt><dd class="mono">http://inventory.localhost → 5173</dd><dt>Zevo will</dt><dd>Write <span class="mono">zevo-inventory.yml</span> to the routes folder and attach <span class="mono">inventory-app-1</span> to the <span class="mono">zevo</span> network. Nothing in the repository changes.</dd></dl>`][S.step];
+  return `<div class="sheet" role="dialog" aria-label="Add project"><header><h2>Add project</h2><ol class="steps">${steps.map((s,i)=>`<li ${i===S.step?'aria-current="step"':""}>${s}</li>`).join("")}</ol></header>
+   <div class="body">${body}</div>
+   <footer><button class="btn" data-close>Cancel</button><span style="display:flex;gap:8px">${S.step?`<button class="btn" data-step="-1">Back</button>`:""}${S.step<3?`<button class="btn primary" data-step="1">Continue</button>`:`<button class="btn primary" data-close>Add project</button>`}</span></footer></div>`;
+}
+function first(){
+  return `<div class="sheet" role="dialog" aria-label="Set up Captain Zevo"><header><h2>Set up Captain Zevo</h2><ol class="steps"><li>Runtime: Docker Desktop 28.4</li><li aria-current="step">Traefik</li></ol></header>
+   <div class="body"><span>A Traefik container named <span class="mono">traefik</span> is already running on this machine.</span>
+   <div class="opts"><button class="opt" data-setup="adopt" aria-pressed="${S.setup==="adopt"}"><b>Use my Traefik</b><span>Zevo adds route files to its folder and connects it to the zevo network. Your existing routes stay as they are.</span></button>
+   <button class="opt" data-setup="own" aria-pressed="${S.setup==="own"}"><b>Start a separate one</b><span>Zevo runs its own Traefik on port 8080, because port 80 is taken.</span></button></div>
+   ${S.setup==="adopt"?`<dl class="kv"><dt>Routes folder</dt><dd class="mono">~/traefik/dynamic</dd><dt>Entrypoint</dt><dd class="mono">web · port 80</dd></dl>`:`<dl class="kv"><dt>Container</dt><dd class="mono">zevo-traefik</dd><dt>Addresses</dt><dd class="mono">http://name.localhost:8080</dd></dl>`}</div>
+   <footer><button class="btn" data-close>Not now</button><button class="btn primary" data-close>${S.setup==="adopt"?"Use this Traefik":"Start Traefik"}</button></footer></div>`;
+}
+
+function render(){
+  nav();
+  $("#main").innerHTML={dash,detail,traefik,hosts,settings}[S.view]();
+  const o=$("#overlay"); o.hidden=!S.overlay; o.innerHTML=S.overlay==="wizard"?wizard():S.overlay==="first"?first():"";
+  document.querySelectorAll(".seg button").forEach(b=>b.setAttribute("aria-pressed",String((S.overlay||S.view)===b.dataset.jump)));
+}
+document.addEventListener("click",e=>{
+  const t=e.target.closest("[data-stop],[data-jump],[data-view],[data-open],[data-tab],[data-step],[data-close],[data-src],[data-setup]"); if(!t) return;
+  const d=t.dataset;
+  if("stop" in d){e.preventDefault();return}
+  if(d.jump){ if(d.jump==="wizard"||d.jump==="first"){S.overlay=d.jump;S.step=0;if(S.view==="detail")S.view="dash"} else {S.overlay=null;S.view=d.jump;S.tab="overview"} }
+  else if(d.view){S.overlay=null;S.view=d.view;if(d.filter)S.filter=d.filter}
+  else if(d.open){S.view="detail";S.slug=d.open;S.tab="overview"}
+  else if(d.tab)S.tab=d.tab;
+  else if(d.step)S.step+=+d.step;
+  else if("close" in d)S.overlay=null;
+  else if(d.src)S.src=d.src;
+  else if(d.setup)S.setup=d.setup;
+  render();
+});
+document.addEventListener("keydown",e=>{ if(e.key==="Enter"&&e.target.matches("tr.row")){S.view="detail";S.slug=e.target.dataset.open;S.tab="overview";render()} if(e.key==="Escape"&&S.overlay){S.overlay=null;render()} });
+document.addEventListener("input",e=>{ if(e.target.id==="q"){S.q=e.target.value;render();const q=$("#q");q.focus();q.setSelectionRange(q.value.length,q.value.length)} });
+render();
+</script>

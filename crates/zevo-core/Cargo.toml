@@ -1,0 +1,28 @@
+[package]
+name = "zevo-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait = "0.1.92"
+bollard = "0.21.1"
+directories = "6.0.0"
+futures-util = "0.3.34"
+jsonc-parser = { version = "0.34.0", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+serde_norway = "0.9.42"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "fs", "process", "time", "sync"] }
+toml = "1.2.1"
+tracing = "0.1.44"
+
+[dev-dependencies]
+insta = "1.49.0"
+tempfile = "3.27.0"
+
+[lints]
+workspace = true
