@@ -1,0 +1,71 @@
+//! Captain Zevo desktop app.
+
+mod backend;
+mod shell;
+
+use std::sync::Arc;
+
+use gpui_kit::component::{Theme, TitleBar};
+use gpui_kit::*;
+
+use backend::{Backend, DemoBackend, SystemBackend};
+
+actions!(zevo, [Quit, Refresh]);
+
+fn main() {
+    // `--demo` shows example projects and touches nothing on this machine.
+    let demo = std::env::args().any(|a| a == "--demo");
+    let backend: Arc<dyn Backend> = if demo {
+        Arc::new(DemoBackend::default())
+    } else {
+        match SystemBackend::new() {
+            Ok(backend) => Arc::new(backend),
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+    };
+
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::Assets)
+        .run(move |cx| {
+            gpui_kit::init(cx);
+            Theme::update(cx, |theme| theme.font_size = px(14.));
+            cx.bind_keys([
+                KeyBinding::new("cmd-q", Quit, None),
+                KeyBinding::new("ctrl-q", Quit, None),
+                KeyBinding::new("cmd-r", Refresh, None),
+                KeyBinding::new("ctrl-r", Refresh, None),
+            ]);
+            cx.on_action(|_: &Quit, cx| cx.quit());
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                    None,
+                    size(px(1180.), px(740.)),
+                    cx,
+                ))),
+                window_min_size: Some(size(px(820.), px(520.))),
+                ..TitleBar::window_options()
+            };
+            gpui_kit::open_window(options, cx, |window, cx| {
+                window.set_window_title("Captain Zevo");
+                Theme::sync_system_appearance(Some(window), cx);
+                window
+                    .observe_window_appearance(|window, cx| {
+                        Theme::sync_system_appearance(Some(window), cx);
+                        Theme::update(cx, |theme| theme.font_size = px(14.));
+                    })
+                    .detach();
+                cx.new(|cx| shell::Shell::new(backend, demo, window, cx))
+            })
+            .expect("failed to open the main window");
+        });
+}

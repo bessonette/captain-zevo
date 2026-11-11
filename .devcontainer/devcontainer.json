@@ -30,6 +30,10 @@
 	// Keeps Claude Code's state in the git-ignored .claude-home folder across rebuilds.
 	"postStartCommand": "sh .devcontainer/link-claude-home.sh",
 
+	// System libraries the desktop app (GPUI) needs to build on Linux, plus a
+	// virtual display so it can be run and screenshotted inside the container.
+	"postCreateCommand": "sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan1 libasound2-dev libssl-dev clang cmake xvfb mesa-vulkan-drivers imagemagick xdotool fonts-dejavu-core",
+
 	// Configure tool-specific properties.
 	// "customizations": {},
 

@@ -1,0 +1,954 @@
+//! The main window: sidebar, project list, project detail and system pages.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use gpui_kit::component::alert::Alert;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::sidebar::{
+    Sidebar, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuItem,
+};
+use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::tag::Tag;
+use gpui_kit::component::{
+    ActiveTheme, IconName, Sizable, StyledExt, TitleBar, WindowExt, h_flex, v_flex,
+};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
+use zevo_core::model::{LOCAL_HOST_ID, Target};
+use zevo_core::reconcile::ContainerState;
+
+use crate::Refresh;
+use crate::backend::{Backend, ProjectView, Snapshot};
+
+const LOGO: &[u8] = include_bytes!("../../../assets/logo.svg");
+
+#[derive(Clone, PartialEq)]
+enum Page {
+    /// Project list, optionally limited to one host.
+    Projects(Option<String>),
+    Project(String),
+    Traefik,
+    Settings,
+}
+
+pub struct Shell {
+    backend: Arc<dyn Backend>,
+    demo: bool,
+    snapshot: Option<Snapshot>,
+    error: Option<String>,
+    loading: bool,
+    page: Page,
+    tab: usize,
+    search: Entity<InputState>,
+    logo: Arc<Image>,
+    focus: FocusHandle,
+    _search_changed: Subscription,
+}
+
+impl Shell {
+    pub fn new(
+        backend: Arc<dyn Backend>,
+        demo: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search projects"));
+        let _search_changed = cx.subscribe(&search, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
+        let mut shell = Self {
+            backend,
+            demo,
+            snapshot: None,
+            error: None,
+            loading: false,
+            page: Page::Projects(None),
+            tab: 0,
+            search,
+            logo: Arc::new(Image::from_bytes(ImageFormat::Svg, LOGO.to_vec())),
+            focus: cx.focus_handle(),
+            _search_changed,
+        };
+        shell.reload(cx);
+        // Containers come and go outside the app, so keep the picture fresh.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(5)).await;
+                if this.update(cx, |this, cx| this.reload(cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        shell
+    }
+
+    fn reload(&mut self, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+        self.loading = true;
+        let backend = self.backend.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_spawn(async move { backend.load() }).await;
+            _ = this.update(cx, |this, cx| {
+                this.loading = false;
+                match result {
+                    Ok(snapshot) => {
+                        this.snapshot = Some(snapshot);
+                        this.error = None;
+                    }
+                    Err(e) => this.error = Some(e),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn go(&mut self, page: Page, cx: &mut Context<Self>) {
+        self.page = page;
+        self.tab = 0;
+        cx.notify();
+    }
+
+    fn remove(&mut self, slug: String, window: &mut Window, cx: &mut Context<Self>) {
+        match self.backend.remove_project(&slug) {
+            Ok(()) => {
+                window.push_notification(format!("Removed {slug}"), cx);
+                self.page = Page::Projects(None);
+                self.reload(cx);
+            }
+            Err(e) => window.push_notification(format!("Could not remove {slug}: {e}"), cx),
+        }
+        cx.notify();
+    }
+}
+
+fn host_label(host: &str) -> String {
+    if host == LOCAL_HOST_ID {
+        "This machine".to_string()
+    } else {
+        host.to_string()
+    }
+}
+
+fn needs_network(view: &ProjectView) -> bool {
+    view.project
+        .routes
+        .iter()
+        .any(|r| r.target == Target::Container)
+}
+
+fn status_tag(view: &ProjectView) -> Tag {
+    let tag = match view.status.state {
+        ContainerState::Running if view.status.attached || !needs_network(view) => {
+            Tag::success().child("Running")
+        }
+        ContainerState::Running => Tag::warning().child("Not attached"),
+        ContainerState::Stopped => Tag::secondary().child("Stopped"),
+        ContainerState::Missing => Tag::danger().child("No container"),
+        ContainerState::Unknown => Tag::secondary().child("Unknown"),
+    };
+    tag.small().rounded_full()
+}
+
+/// Uppercase column or section caption.
+fn caption(text: &'static str, cx: &App) -> Div {
+    div()
+        .text_xs()
+        .font_medium()
+        .text_color(cx.theme().muted_foreground)
+        .child(text.to_uppercase())
+}
+
+fn mono(text: impl Into<SharedString>, cx: &App) -> Div {
+    div()
+        .font_family(cx.theme().mono_font_family.clone())
+        .text_size(cx.theme().mono_font_size)
+        .child(text.into())
+}
+
+/// A label and its value on one line.
+fn field(label: &'static str, value: impl IntoElement, cx: &App) -> Div {
+    h_flex()
+        .items_start()
+        .gap_4()
+        .child(
+            div()
+                .w(px(130.))
+                .flex_shrink_0()
+                .text_color(cx.theme().muted_foreground)
+                .child(label),
+        )
+        .child(div().flex_1().min_w_0().child(value))
+}
+
+impl Shell {
+    fn render_sidebar(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut hosts: Vec<String> = snapshot
+            .projects
+            .iter()
+            .map(|p| p.project.host.clone())
+            .collect();
+        hosts.sort_by_key(|h| (h != LOCAL_HOST_ID, h.clone()));
+        hosts.dedup();
+
+        let count = |host: Option<&str>| {
+            snapshot
+                .projects
+                .iter()
+                .filter(|p| host.is_none_or(|h| p.project.host == h))
+                .count()
+        };
+        let in_projects = matches!(self.page, Page::Projects(_) | Page::Project(_));
+        let current_filter = match &self.page {
+            Page::Projects(filter) => filter.clone(),
+            _ => None,
+        };
+
+        let mut project_items = vec![
+            SidebarMenuItem::new("All projects")
+                .icon(IconName::LayoutDashboard)
+                .active(in_projects && current_filter.is_none())
+                .suffix({
+                    let n = count(None);
+                    move |_, cx| {
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(n.to_string())
+                    }
+                })
+                .on_click(cx.listener(|this, _, _, cx| this.go(Page::Projects(None), cx))),
+        ];
+        for host in hosts {
+            let n = count(Some(&host));
+            let target = host.clone();
+            project_items.push(
+                SidebarMenuItem::new(host_label(&host))
+                    .icon(if host == LOCAL_HOST_ID {
+                        IconName::HardDrive
+                    } else {
+                        IconName::Network
+                    })
+                    .active(current_filter.as_deref() == Some(host.as_str()))
+                    .suffix(move |_, cx| {
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(n.to_string())
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.go(Page::Projects(Some(target.clone())), cx)
+                    })),
+            );
+        }
+
+        let traefik_line = match &snapshot.settings.traefik {
+            Some(t) => format!("{} · port {}", t.entrypoint, t.http_port),
+            None => "Traefik not set up".to_string(),
+        };
+        let runtime_ok = snapshot.runtime.is_ok();
+
+        Sidebar::new("nav")
+            .collapsible(false)
+            .w(px(216.))
+            .header(
+                SidebarHeader::new().child(
+                    h_flex()
+                        .gap_2()
+                        .child(img(self.logo.clone()).size(px(22.)))
+                        .child(div().font_semibold().child("Captain Zevo")),
+                ),
+            )
+            .child(SidebarGroup::new("Projects").child(SidebarMenu::new().children(project_items)))
+            .child(
+                SidebarGroup::new("System").child(
+                    SidebarMenu::new()
+                        .child(
+                            SidebarMenuItem::new("Traefik")
+                                .icon(IconName::Globe)
+                                .active(self.page == Page::Traefik)
+                                .on_click(cx.listener(|this, _, _, cx| this.go(Page::Traefik, cx))),
+                        )
+                        .child(
+                            SidebarMenuItem::new("Settings")
+                                .icon(IconName::Settings)
+                                .active(self.page == Page::Settings)
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.go(Page::Settings, cx)),
+                                ),
+                        ),
+                ),
+            )
+            .footer(
+                SidebarFooter::new().child(
+                    v_flex()
+                        .gap_1()
+                        .text_xs()
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(div().size(px(7.)).rounded_full().bg(if runtime_ok {
+                                    cx.theme().success
+                                } else {
+                                    cx.theme().danger
+                                }))
+                                .child(if runtime_ok {
+                                    "Runtime connected"
+                                } else {
+                                    "Runtime unreachable"
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(traefik_line),
+                        ),
+                ),
+            )
+    }
+
+    fn page_header(&self, title: impl IntoElement, actions: impl IntoElement, cx: &App) -> Div {
+        h_flex()
+            .flex_shrink_0()
+            .h(px(52.))
+            .px_4()
+            .gap_2()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_3()
+                    .text_lg()
+                    .font_semibold()
+                    .child(title),
+            )
+            .child(actions)
+    }
+
+    fn render_projects(
+        &self,
+        snapshot: &Snapshot,
+        filter: &Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let query = self.search.read(cx).value().to_lowercase();
+        let rows: Vec<&ProjectView> = snapshot
+            .projects
+            .iter()
+            .filter(|p| filter.as_ref().is_none_or(|h| &p.project.host == h))
+            .filter(|p| {
+                query.is_empty()
+                    || p.project.name.to_lowercase().contains(&query)
+                    || p.project.slug.contains(&query)
+                    || p.project
+                        .tags
+                        .iter()
+                        .any(|t| t.to_lowercase().contains(&query))
+            })
+            .collect();
+
+        let title = filter
+            .as_deref()
+            .map(host_label)
+            .unwrap_or_else(|| "All projects".to_string());
+        let header = self.page_header(
+            title,
+            h_flex()
+                .gap_2()
+                .child(
+                    div().w(px(220.)).child(
+                        Input::new(&self.search)
+                            .prefix(IconName::Search)
+                            .cleanable(true)
+                            .small(),
+                    ),
+                )
+                .child(
+                    Button::new("refresh")
+                        .ghost()
+                        .small()
+                        .icon(IconName::RefreshCw)
+                        .tooltip("Refresh")
+                        .loading(self.loading)
+                        .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
+                ),
+            cx,
+        );
+
+        let columns = h_flex()
+            .flex_shrink_0()
+            .px_4()
+            .py_2()
+            .gap_3()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(caption("Status", cx).w(px(118.)))
+            .child(caption("Project", cx).flex_1())
+            .child(caption("Address", cx).flex_1())
+            .child(caption("Host", cx).w(px(120.)))
+            .child(caption("Type", cx).w(px(90.)));
+
+        let body = if rows.is_empty() {
+            let message = if snapshot.projects.is_empty() {
+                "No projects yet. Register one with: zevo add <folder>"
+            } else {
+                "No projects match. Clear the search to see them all."
+            };
+            v_flex()
+                .p_8()
+                .items_center()
+                .text_color(cx.theme().muted_foreground)
+                .child(message)
+        } else {
+            v_flex().children(rows.into_iter().enumerate().map(|(ix, view)| {
+                let slug = view.project.slug.clone();
+                let addresses = if view.project.routes.is_empty() {
+                    v_flex()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("no routes")
+                } else {
+                    v_flex()
+                        .gap_0p5()
+                        .children(view.project.routes.iter().map(|r| {
+                            let host =
+                                r.hostname(&view.project.slug, &snapshot.settings.domain_suffix);
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    mono(
+                                        format!("{host}{}", r.path_prefix.as_deref().unwrap_or("")),
+                                        cx,
+                                    )
+                                    .text_color(cx.theme().link),
+                                )
+                                .child(
+                                    mono(format!("→ {}", r.port), cx)
+                                        .text_color(cx.theme().muted_foreground),
+                                )
+                        }))
+                };
+                h_flex()
+                    .id(("project-row", ix))
+                    .px_4()
+                    .py_2()
+                    .gap_3()
+                    .items_start()
+                    .border_b_1()
+                    .border_color(cx.theme().border.opacity(0.6))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(cx.theme().list_hover))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.go(Page::Project(slug.clone()), cx)),
+                    )
+                    .child(h_flex().w(px(118.)).child(status_tag(view)))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().font_medium().child(view.project.name.clone()))
+                            .child(
+                                mono(view.project.slug.clone(), cx)
+                                    .text_color(cx.theme().muted_foreground),
+                            ),
+                    )
+                    .child(div().flex_1().min_w_0().child(addresses))
+                    .child(div().w(px(120.)).child(host_label(&view.project.host)))
+                    .child(
+                        h_flex().w(px(90.)).child(
+                            Tag::secondary()
+                                .small()
+                                .outline()
+                                .child(format!("{:?}", view.project.kind).to_lowercase()),
+                        ),
+                    )
+            }))
+        };
+
+        v_flex().size_full().child(header).child(columns).child(
+            div()
+                .flex_1()
+                .overflow_hidden()
+                .child(v_flex().size_full().overflow_y_scrollbar().child(body)),
+        )
+    }
+
+    fn render_project(
+        &self,
+        snapshot: &Snapshot,
+        view: &ProjectView,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let p = &view.project;
+        let first_url = view.status.urls.first().cloned();
+        let slug = p.slug.clone();
+
+        let header = self.page_header(
+            h_flex()
+                .gap_2()
+                .child(
+                    Button::new("back")
+                        .ghost()
+                        .small()
+                        .icon(IconName::ArrowLeft)
+                        .tooltip("All projects")
+                        .on_click(cx.listener(|this, _, _, cx| this.go(Page::Projects(None), cx))),
+                )
+                .child(p.name.clone())
+                .child(status_tag(view)),
+            h_flex()
+                .gap_2()
+                .child(
+                    Button::new("remove")
+                        .small()
+                        .outline()
+                        .label("Remove")
+                        .on_click(cx.listener(move |_, _, window, cx| {
+                        let shell = cx.entity().downgrade();
+                        let slug = slug.clone();
+                        window.open_dialog(cx, move |dialog, _, _| {
+                            let shell = shell.clone();
+                            let slug = slug.clone();
+                            dialog
+                                .title(format!("Remove {slug}?"))
+                                .child(
+                                    "Zevo forgets this project and deletes its Traefik route file. \
+                                         The folder and its container are not touched.",
+                                )
+                                .footer(
+                                    DialogFooter::new()
+                                        .child(DialogClose::new().trigger(|b| b.label("Cancel")))
+                                        .child(DialogAction::new().child(
+                                            Button::new("confirm-remove").danger().label("Remove"),
+                                        )),
+                                )
+                                .on_ok(move |_, window, cx| {
+                                    _ = shell.update(cx, |this, cx| {
+                                        this.remove(slug.clone(), window, cx)
+                                    });
+                                    true
+                                })
+                        });
+                    })),
+                )
+                .when_some(first_url, |row, url| {
+                    row.child(
+                        Button::new("open")
+                            .primary()
+                            .small()
+                            .icon(IconName::ExternalLink)
+                            .label("Open in browser")
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    )
+                }),
+            cx,
+        );
+
+        let tabs = TabBar::new("project-tabs")
+            .underline()
+            .selected_index(self.tab)
+            .children([
+                Tab::new().label("Overview"),
+                Tab::new().label(format!("Routes ({})", p.routes.len())),
+                Tab::new().label("Config"),
+            ])
+            .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                this.tab = *ix;
+                cx.notify();
+            }));
+
+        let body = match self.tab {
+            0 => {
+                let notice = match view.status.state {
+                    ContainerState::Running if !view.status.attached && needs_network(view) => {
+                        Some(Alert::warning(
+                            "state",
+                            format!(
+                                "The container is running but is not on the {} network, so its address will not respond yet.",
+                                snapshot.settings.network
+                            ),
+                        ))
+                    }
+                    ContainerState::Missing => Some(Alert::error(
+                        "state",
+                        "No container exists for this folder. Open the project in your editor to build it.",
+                    )),
+                    _ => None,
+                };
+                v_flex()
+                    .gap_5()
+                    .children(notice)
+                    .child(
+                        v_flex()
+                            .gap_2()
+                            .child(caption("Project", cx))
+                            .child(field("Folder", mono(p.path.display().to_string(), cx), cx))
+                            .child(field("Host", host_label(&p.host), cx))
+                            .child(field(
+                                "Devcontainer",
+                                format!("{:?}", p.kind).to_lowercase(),
+                                cx,
+                            ))
+                            .child(field(
+                                "Container",
+                                mono(
+                                    view.status.container.clone().unwrap_or_else(|| "—".into()),
+                                    cx,
+                                ),
+                                cx,
+                            ))
+                            .child(field(
+                                "Tags",
+                                if p.tags.is_empty() {
+                                    "—".to_string()
+                                } else {
+                                    p.tags.join(", ")
+                                },
+                                cx,
+                            )),
+                    )
+                    .child(v_flex().gap_2().child(caption("Addresses", cx)).children(
+                        if view.status.urls.is_empty() {
+                            vec![div().text_color(cx.theme().muted_foreground).child(format!(
+                                "No routes yet. Add one with: zevo route add {} PORT",
+                                p.slug
+                            ))]
+                        } else {
+                            view.status
+                                .urls
+                                .iter()
+                                .enumerate()
+                                .map(|(ix, url)| {
+                                    let target = url.clone();
+                                    div().child(
+                                        h_flex()
+                                            .id(("url", ix))
+                                            .cursor_pointer()
+                                            .on_click(move |_, _, cx| cx.open_url(&target))
+                                            .child(
+                                                mono(url.clone(), cx).text_color(cx.theme().link),
+                                            ),
+                                    )
+                                })
+                                .collect()
+                        },
+                    ))
+            }
+            1 => v_flex()
+                .child(
+                    h_flex()
+                        .py_2()
+                        .gap_3()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .child(caption("Address", cx).flex_1())
+                        .child(caption("Sends to", cx).flex_1())
+                        .child(caption("Port", cx).w(px(70.)))
+                        .child(caption("Path", cx).w(px(90.))),
+                )
+                .children(p.routes.iter().map(|r| {
+                    h_flex()
+                        .py_2()
+                        .gap_3()
+                        .border_b_1()
+                        .border_color(cx.theme().border.opacity(0.6))
+                        .child(
+                            mono(r.hostname(&p.slug, &snapshot.settings.domain_suffix), cx)
+                                .flex_1(),
+                        )
+                        .child(div().flex_1().child(match &r.target {
+                            Target::Container => "Container (shared network)".to_string(),
+                            Target::HostPort { address } => address.clone(),
+                        }))
+                        .child(mono(r.port.to_string(), cx).w(px(70.)))
+                        .child(
+                            mono(r.path_prefix.clone().unwrap_or_else(|| "/".into()), cx)
+                                .w(px(90.)),
+                        )
+                }))
+                .when(p.routes.is_empty(), |list| {
+                    list.child(
+                        div()
+                            .py_4()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("No routes yet."),
+                    )
+                }),
+            _ => v_flex()
+                .gap_2()
+                .child(
+                    h_flex().gap_2().child(caption("Traefik file", cx)).child(
+                        mono(zevo_core::traefik::file_name(&p.slug), cx)
+                            .text_color(cx.theme().muted_foreground),
+                    ),
+                )
+                .child(
+                    v_flex()
+                        .p_3()
+                        .rounded(cx.theme().radius)
+                        .bg(cx.theme().muted)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        // One element per line; leading spaces are kept as non-breaking.
+                        .children(view.yaml.lines().map(|line| {
+                            let indent = line.len() - line.trim_start().len();
+                            mono(line.trim_start().to_string(), cx)
+                                .pl(px(indent as f32 * 7.8))
+                                .when(line.starts_with('#'), |d| {
+                                    d.text_color(cx.theme().muted_foreground)
+                                })
+                        })),
+                ),
+        };
+
+        v_flex()
+            .size_full()
+            .child(header)
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .px_2()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(tabs),
+            )
+            .child(
+                div().flex_1().overflow_hidden().child(
+                    v_flex()
+                        .size_full()
+                        .overflow_y_scrollbar()
+                        .child(div().p_4().child(body)),
+                ),
+            )
+    }
+
+    fn render_traefik(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> Div {
+        let header = self.page_header("Traefik", div(), cx);
+        let details = match &snapshot.settings.traefik {
+            None => v_flex().child(Alert::warning(
+                "setup",
+                "Traefik is not set up yet. Run `zevo setup` in a terminal, then refresh.",
+            )),
+            Some(t) => v_flex()
+                .gap_2()
+                .child(field(
+                    "Container",
+                    mono(
+                        t.container
+                            .clone()
+                            .unwrap_or_else(|| "not in a container".into()),
+                        cx,
+                    ),
+                    cx,
+                ))
+                .child(field(
+                    "Routes folder",
+                    mono(t.dynamic_dir.display().to_string(), cx),
+                    cx,
+                ))
+                .child(field(
+                    "Entrypoint",
+                    mono(format!("{} · port {}", t.entrypoint, t.http_port), cx),
+                    cx,
+                ))
+                .child(field(
+                    "Network",
+                    mono(snapshot.settings.network.clone(), cx),
+                    cx,
+                )),
+        };
+        let routers = v_flex()
+            .child(
+                h_flex()
+                    .py_2()
+                    .gap_3()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(caption("Address", cx).flex_1())
+                    .child(caption("Owner", cx).w(px(200.)))
+                    .child(caption("File", cx).flex_1()),
+            )
+            .children(snapshot.routers.iter().enumerate().map(|(ix, r)| {
+                let owner = match &r.slug {
+                    Some(slug) => {
+                        let target = slug.clone();
+                        div().child(
+                            div()
+                                .id(("owner", ix))
+                                .cursor_pointer()
+                                .text_color(cx.theme().link)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.go(Page::Project(target.clone()), cx)
+                                }))
+                                .child(slug.clone()),
+                        )
+                    }
+                    None => div()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Not managed by Zevo"),
+                };
+                h_flex()
+                    .py_2()
+                    .gap_3()
+                    .border_b_1()
+                    .border_color(cx.theme().border.opacity(0.6))
+                    .child(mono(r.hostnames.join(", "), cx).flex_1())
+                    .child(owner.w(px(200.)))
+                    .child(
+                        mono(
+                            r.file
+                                .file_name()
+                                .map(|f| f.to_string_lossy().into_owned())
+                                .unwrap_or_default(),
+                            cx,
+                        )
+                        .flex_1()
+                        .text_color(cx.theme().muted_foreground),
+                    )
+            }));
+        v_flex().size_full().child(header).child(
+            div().flex_1().overflow_hidden().child(
+                v_flex().size_full().overflow_y_scrollbar().child(
+                    v_flex().p_4().gap_5().child(details).child(
+                        v_flex()
+                            .gap_1()
+                            .child(caption("Routers", cx))
+                            .child(routers),
+                    ),
+                ),
+            ),
+        )
+    }
+
+    fn render_settings(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> Div {
+        v_flex().size_full().child(self.page_header("Settings", div(), cx)).child(
+            v_flex()
+                .p_4()
+                .gap_2()
+                .child(field("Domain suffix", mono(snapshot.settings.domain_suffix.clone(), cx), cx))
+                .child(field("Network", mono(snapshot.settings.network.clone(), cx), cx))
+                .child(field(
+                    "Runtime",
+                    match &snapshot.runtime {
+                        Ok(version) => version.clone(),
+                        Err(e) => format!("Unreachable: {e}"),
+                    },
+                    cx,
+                ))
+                .child(
+                    div()
+                        .pt_3()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Settings are stored in settings.toml in the Zevo config folder and can be edited there."),
+                ),
+        )
+    }
+}
+
+impl Render for Shell {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let title_bar = TitleBar::new().child(
+            h_flex()
+                .gap_2()
+                .text_sm()
+                .child("Captain Zevo")
+                .when(self.demo, |row| {
+                    row.child(Tag::info().small().child("Example data"))
+                }),
+        );
+
+        let Some(snapshot) = self.snapshot.clone() else {
+            let content = match &self.error {
+                Some(e) => {
+                    div().child(Alert::error("load", e.clone()).title("Could not load projects"))
+                }
+                None => h_flex()
+                    .gap_2()
+                    .child(Spinner::new())
+                    .child("Loading projects…"),
+            };
+            return v_flex()
+                .size_full()
+                .bg(cx.theme().background)
+                .text_color(cx.theme().foreground)
+                .child(title_bar)
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(content),
+                );
+        };
+
+        let page = match self.page.clone() {
+            Page::Projects(filter) => self.render_projects(&snapshot, &filter, cx),
+            Page::Project(slug) => {
+                match snapshot.projects.iter().find(|p| p.project.slug == slug) {
+                    Some(view) => self.render_project(&snapshot, view, cx),
+                    // Removed elsewhere while it was open.
+                    None => self.render_projects(&snapshot, &None, cx),
+                }
+            }
+            Page::Traefik => self.render_traefik(&snapshot, cx),
+            Page::Settings => self.render_settings(&snapshot, cx),
+        };
+
+        let banners = v_flex()
+            .flex_shrink_0()
+            .when_some(self.error.clone(), |col, e| {
+                col.child(Alert::error("refresh-error", e).banner())
+            })
+            .when(snapshot.needs_setup(), |col| {
+                col.child(
+                    Alert::warning(
+                        "needs-setup",
+                        "Traefik is not set up yet. Run `zevo setup` in a terminal, then refresh.",
+                    )
+                    .banner(),
+                )
+            })
+            .children(
+                snapshot
+                    .warnings
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, w)| Alert::warning(("warning", ix), w.clone()).banner()),
+            );
+
+        v_flex()
+            .size_full()
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &Refresh, _, cx| this.reload(cx)))
+            .child(title_bar)
+            .child(
+                h_flex()
+                    .flex_1()
+                    .items_start()
+                    .overflow_hidden()
+                    .child(self.render_sidebar(&snapshot, cx))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .h_full()
+                            .min_w_0()
+                            .child(banners)
+                            .child(div().flex_1().overflow_hidden().child(page)),
+                    ),
+            )
+    }
+}

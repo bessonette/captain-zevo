@@ -1,0 +1,16 @@
+[package]
+name = "zevo-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Captain Zevo desktop app"
+
+[dependencies]
+gpui-kit = "=0.9.1"
+tokio = { version = "1.54.1", features = ["rt-multi-thread"] }
+zevo-core = { version = "0.1.0", path = "../zevo-core" }
+
+[lints]
+workspace = true

@@ -119,13 +119,25 @@ Hand edits take effect on the next `zevo reconcile`.
 ## Roadmap
 
 1. **Core and CLI, local projects** — done.
-2. **Desktop app** — dashboard, project detail, add-project wizard, first-run setup.
+2. **Desktop app** — in progress. The project list, project detail and Traefik
+   screens work; the add-project wizard and first-run setup are next.
 3. **Lifecycle and editors** — start/stop/rebuild, logs, discovery of running
    devcontainers, new projects from templates, open in VS Code (and forks),
    Zed and JetBrains.
 4. **Remote hosts** — projects on other machines over SSH, with an edge Traefik
    per host.
 5. **Polish** — installers, system tray, local HTTPS.
+
+## Desktop app (preview)
+
+```sh
+cargo run -p zevo-app            # your real projects
+cargo run -p zevo-app -- --demo  # example data; touches nothing
+```
+
+The app shows what the CLI manages and refreshes every few seconds. Projects
+are still added and edited with `zevo`. On Linux it needs the libraries listed
+in [.devcontainer/devcontainer.json](.devcontainer/devcontainer.json).
 
 ## Development
 

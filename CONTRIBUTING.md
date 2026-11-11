@@ -8,6 +8,7 @@ Thanks for your interest. Issues and pull requests are welcome.
 |---|---|
 | `crates/zevo-core` | All logic: registry (`store`), Traefik files (`traefik`), devcontainer detection (`devcontainer`), runtime access (`runtime`), setup, reconciliation, doctor. No UI code. |
 | `crates/zevo-cli` | The `zevo` binary; a thin layer over `zevo-core`. |
+| `crates/zevo-app` | The desktop app (GPUI via `gpui-kit`). Views read a `Backend` trait, so `--demo` and tests run on example data. |
 
 New behaviour belongs in `zevo-core` so the CLI and the desktop app share it.
 
