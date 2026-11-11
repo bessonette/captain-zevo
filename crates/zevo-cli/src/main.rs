@@ -178,6 +178,7 @@ fn parse_route(spec: &str, address: Option<&str>, path_prefix: Option<String>) -
     }
     Ok(Route {
         backend: zevo_core::model::Backend::default(),
+        host: None,
         subdomain,
         port,
         path_prefix,
@@ -367,7 +368,15 @@ async fn cmd_add(store: &Store, args: AddArgs, json: bool) -> Result<()> {
         project.name = name;
     }
     project.tags = args.tags;
-    if !args.routes.is_empty() {
+    if project.declared {
+        if !args.routes.is_empty() {
+            bail!(
+                "this project defines its routes in devcontainer.json (customizations.zevo); remove --route"
+            );
+        }
+        project.address = args.address.clone();
+        register::apply_address(&mut project);
+    } else if !args.routes.is_empty() {
         project.routes.clear();
         for spec in &args.routes {
             project
@@ -415,6 +424,7 @@ async fn cmd_route(store: &Store, command: RouteCommand) -> Result<()> {
             address,
         } => {
             let mut project = store.project(&slug)?;
+            register::ensure_routes_editable(&project)?;
             project
                 .routes
                 .push(parse_route(&route, address.as_deref(), path_prefix)?);
@@ -422,6 +432,7 @@ async fn cmd_route(store: &Store, command: RouteCommand) -> Result<()> {
         }
         RouteCommand::Rm { slug, subdomain } => {
             let mut project = store.project(&slug)?;
+            register::ensure_routes_editable(&project)?;
             let before = project.routes.len();
             project.routes.retain(|r| r.subdomain != subdomain);
             if project.routes.len() == before {

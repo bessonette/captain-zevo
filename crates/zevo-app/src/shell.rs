@@ -710,25 +710,34 @@ impl Shell {
                             mono(r.hostname(&p.slug, &snapshot.settings.domain_suffix), cx)
                                 .flex_1(),
                         )
-                        .child(div().flex_1().child(match &r.target {
-                            Target::Container => "Container (shared network)".to_string(),
-                            Target::HostPort { address } => address.clone(),
+                        .child(div().flex_1().child({
+                            let to = match &r.target {
+                                Target::Container => "Container (shared network)".to_string(),
+                                Target::HostPort { address } => address.clone(),
+                            };
+                            if r.backend == zevo_core::model::Backend::Https {
+                                format!("{to} · HTTPS")
+                            } else {
+                                to
+                            }
                         }))
                         .child(mono(r.port.to_string(), cx).w(px(70.)))
                         .child(
                             mono(r.path_prefix.clone().unwrap_or_else(|| "/".into()), cx)
                                 .w(px(90.)),
                         )
-                        .child(
-                            Button::new(("remove-route", ix))
-                                .ghost()
-                                .small()
-                                .icon(IconName::Close)
-                                .tooltip("Remove this route")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.remove_route(project.clone(), ix, window, cx)
-                                })),
-                        )
+                        .child(div().w(px(32.)).when(!p.declared, |cell| {
+                            cell.child(
+                                Button::new(("remove-route", ix))
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::Close)
+                                    .tooltip("Remove this route")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.remove_route(project.clone(), ix, window, cx)
+                                    })),
+                            )
+                        }))
                 }))
                 .when(p.routes.is_empty(), |list| {
                     list.child(
@@ -738,16 +747,23 @@ impl Shell {
                             .child("No routes yet."),
                     )
                 })
-                .child(h_flex().pt_3().child({
-                    let project = p.clone();
-                    Button::new("add-route")
-                        .small()
-                        .icon(IconName::Plus)
-                        .label("Add route")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.ask_new_route(project.clone(), window, cx)
-                        }))
-                })),
+                .child(if p.declared {
+                    div().pt_3().text_color(cx.theme().muted_foreground).child(
+                        "These routes are defined in the project's devcontainer.json, under \
+                         customizations.zevo. Edit them there; Zevo picks up changes within a few seconds.",
+                    )
+                } else {
+                    h_flex().pt_3().child({
+                        let project = p.clone();
+                        Button::new("add-route")
+                            .small()
+                            .icon(IconName::Plus)
+                            .label("Add route")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.ask_new_route(project.clone(), window, cx)
+                            }))
+                    })
+                }),
             _ => v_flex()
                 .gap_2()
                 .child(

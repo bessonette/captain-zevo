@@ -243,6 +243,7 @@ impl Default for DemoBackend {
                      prefix: Option<&str>,
                      address: Option<&str>| Route {
             backend: zevo_core::model::Backend::default(),
+            host: None,
             subdomain: subdomain.map(Into::into),
             port,
             path_prefix: prefix.map(Into::into),
@@ -260,6 +261,8 @@ impl Default for DemoBackend {
                        kind,
                        routes: Vec<Route>,
                        tags: &[&str]| Project {
+            declared: false,
+            address: None,
             slug: slug.into(),
             name: name.into(),
             host: host.into(),
@@ -453,6 +456,8 @@ impl Backend for DemoBackend {
             .next()
             .unwrap_or(folder);
         Ok(Project {
+            declared: false,
+            address: None,
             slug: zevo_core::model::slugify(name),
             name: name.to_string(),
             host: LOCAL_HOST_ID.into(),
@@ -461,6 +466,7 @@ impl Backend for DemoBackend {
             service: Some("app".into()),
             routes: vec![Route {
                 backend: zevo_core::model::Backend::default(),
+                host: None,
                 subdomain: None,
                 port: 5173,
                 path_prefix: None,

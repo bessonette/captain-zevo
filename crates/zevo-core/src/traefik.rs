@@ -528,6 +528,7 @@ mod tests {
     fn route(sub: Option<&str>, port: u16) -> Route {
         Route {
             backend: crate::model::Backend::default(),
+            host: None,
             subdomain: sub.map(Into::into),
             port,
             path_prefix: None,
@@ -537,6 +538,8 @@ mod tests {
 
     fn project(slug: &str, routes: Vec<Route>) -> Project {
         Project {
+            declared: false,
+            address: None,
             slug: slug.into(),
             name: slug.into(),
             host: "local".into(),
@@ -556,11 +559,13 @@ mod tests {
                 route(Some("api"), 8080),
                 Route {
                     backend: crate::model::Backend::default(),
+                    host: None,
                     path_prefix: Some("/v2".into()),
                     ..route(Some("api"), 8081)
                 },
                 Route {
                     backend: crate::model::Backend::default(),
+                    host: None,
                     target: Target::HostPort {
                         address: "192.168.1.20".into(),
                     },
@@ -708,6 +713,7 @@ http:
             "v6",
             vec![Route {
                 backend: crate::model::Backend::default(),
+                host: None,
                 target: Target::HostPort {
                     address: "::1".into(),
                 },

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value as Json;
 use serde_norway::Value as Yaml;
 
-use crate::model::DevcontainerKind;
+use crate::model::{Backend, DevcontainerKind, Route, Target, validate_slug};
 use crate::{Error, Result};
 
 /// What [`detect`] found in a project folder.
@@ -26,6 +26,96 @@ pub struct Detected {
     pub service: Option<String>,
     /// Candidate app ports, deduplicated, in first-seen order.
     pub ports: Vec<u16>,
+    /// The `customizations.zevo` block, if the project has one.
+    pub declared: Option<Declared>,
+}
+
+/// What a project says about itself in `customizations.zevo`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Declared {
+    pub name: Option<String>,
+    /// Suggested short name; the user may pick another when adding.
+    pub slug: Option<String>,
+    pub routes: Vec<Route>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawDeclared {
+    name: Option<String>,
+    slug: Option<String>,
+    #[serde(default)]
+    routes: Vec<RawRoute>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawRoute {
+    subdomain: Option<String>,
+    #[serde(default)]
+    subdomains: Vec<String>,
+    host: Option<String>,
+    port: u16,
+    path_prefix: Option<String>,
+    #[serde(default)]
+    backend: Backend,
+}
+
+/// Reads `customizations.zevo`, expanding `subdomains` lists into one route each.
+fn parse_declared(value: &Json) -> std::result::Result<Declared, String> {
+    let raw: RawDeclared = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+    if let Some(slug) = &raw.slug {
+        validate_slug(slug).map_err(|e| e.to_string())?;
+    }
+    let mut routes = Vec::new();
+    for r in raw.routes {
+        if r.port == 0 {
+            return Err("a route's port cannot be 0".into());
+        }
+        if let Some(prefix) = &r.path_prefix
+            && !prefix.starts_with('/')
+        {
+            return Err(format!("pathPrefix '{prefix}' must start with '/'"));
+        }
+        let route = |subdomain: Option<String>, host: Option<String>| Route {
+            subdomain,
+            port: r.port,
+            path_prefix: r.path_prefix.clone(),
+            target: Target::Container,
+            backend: r.backend,
+            host,
+        };
+        if let Some(host) = &r.host {
+            if r.subdomain.is_some() || !r.subdomains.is_empty() {
+                return Err(format!(
+                    "route '{host}': use either host or subdomain, not both"
+                ));
+            }
+            let ok = !host.is_empty()
+                && host
+                    .split('.')
+                    .all(|label| validate_slug(&label.to_lowercase()).is_ok());
+            if !ok {
+                return Err(format!("'{host}' is not a valid hostname"));
+            }
+            routes.push(route(None, Some(host.to_lowercase())));
+            continue;
+        }
+        let mut subs: Vec<String> = r.subdomain.iter().cloned().collect();
+        subs.extend(r.subdomains.iter().cloned());
+        if subs.is_empty() {
+            routes.push(route(None, None));
+        }
+        for sub in subs {
+            validate_slug(&sub).map_err(|e| e.to_string())?;
+            routes.push(route(Some(sub), None));
+        }
+    }
+    Ok(Declared {
+        name: raw.name,
+        slug: raw.slug,
+        routes,
+    })
 }
 
 /// Inspects `folder`.
@@ -72,6 +162,13 @@ pub fn detect(folder: &Path) -> Result<Detected> {
     let name = obj.get("name").and_then(Json::as_str).map(str::to_owned);
     let service = match kind {
         DevcontainerKind::Compose => obj.get("service").and_then(Json::as_str).map(str::to_owned),
+        _ => None,
+    };
+
+    let declared = match obj.get("customizations").and_then(|c| c.get("zevo")) {
+        Some(value) if !value.is_null() => Some(
+            parse_declared(value).map_err(|e| config_err(format!("customizations.zevo: {e}")))?,
+        ),
         _ => None,
     };
 
@@ -128,6 +225,7 @@ pub fn detect(folder: &Path) -> Result<Detected> {
         name,
         service,
         ports: ports.0,
+        declared,
     })
 }
 
@@ -517,5 +615,77 @@ services:
                 .unwrap()
                 .ends_with(".devcontainer/devcontainer.json")
         );
+    }
+
+    #[test]
+    fn reads_the_zevo_declaration() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".devcontainer")).unwrap();
+        std::fs::write(
+            tmp.path().join(".devcontainer/devcontainer.json"),
+            r#"{
+              "image": "node",
+              "customizations": {
+                "vscode": { "extensions": [] },
+                "zevo": {
+                  "name": "Kindly", "slug": "kindly",
+                  "routes": [
+                    { "port": 3001, "backend": "https" },
+                    { "subdomains": ["donate", "funds"], "port": 1355, "backend": "https" },
+                    { "subdomain": "api", "port": 8000, "pathPrefix": "/v1" },
+                    { "host": "Local.Dash.Example.ai", "port": 4000 },
+                  ]
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        let d = detect(tmp.path()).unwrap().declared.unwrap();
+        assert_eq!(
+            (d.name.as_deref(), d.slug.as_deref()),
+            (Some("Kindly"), Some("kindly"))
+        );
+        let names: Vec<String> = d
+            .routes
+            .iter()
+            .map(|r| r.hostname("kindly", "localhost"))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "kindly.localhost",
+                "donate.kindly.localhost",
+                "funds.kindly.localhost",
+                "api.kindly.localhost",
+                "local.dash.example.ai"
+            ]
+        );
+        assert_eq!(d.routes[1].backend, Backend::Https);
+        assert_eq!(d.routes[1].port, 1355);
+        assert_eq!(d.routes[3].path_prefix.as_deref(), Some("/v1"));
+        assert_eq!(d.routes[3].backend, Backend::Http);
+    }
+
+    #[test]
+    fn rejects_a_bad_declaration_with_a_useful_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let write = |zevo: &str| {
+            std::fs::write(
+                tmp.path().join(".devcontainer.json"),
+                format!(r#"{{"image":"node","customizations":{{"zevo":{zevo}}}}}"#),
+            )
+            .unwrap();
+            detect(tmp.path()).unwrap_err().to_string()
+        };
+        assert!(write(r#"{"routes":[{"port":3000,"subdomian":"api"}]}"#).contains("subdomian"));
+        assert!(write(r#"{"routes":[{"port":3000,"subdomain":"Bad_Name"}]}"#).contains("Bad_Name"));
+        assert!(
+            write(r#"{"routes":[{"port":3000,"host":"a.b","subdomain":"x"}]}"#)
+                .contains("either host or subdomain")
+        );
+        assert!(
+            write(r#"{"routes":[{"port":3000,"pathPrefix":"v1"}]}"#).contains("must start with")
+        );
+        assert!(write(r#"{"routes":[{"subdomain":"api"}]}"#).contains("port"));
     }
 }

@@ -165,6 +165,8 @@ mod tests {
 
     fn project(slug: &str) -> Project {
         Project {
+            declared: false,
+            address: None,
             slug: slug.into(),
             name: slug.into(),
             host: "local".into(),
@@ -174,6 +176,7 @@ mod tests {
             routes: vec![
                 Route {
                     backend: crate::model::Backend::default(),
+                    host: None,
                     subdomain: None,
                     port: 3000,
                     path_prefix: None,
@@ -181,6 +184,7 @@ mod tests {
                 },
                 Route {
                     backend: crate::model::Backend::default(),
+                    host: None,
                     subdomain: Some("api".into()),
                     port: 8080,
                     path_prefix: Some("/v1".into()),

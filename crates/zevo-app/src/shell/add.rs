@@ -73,6 +73,7 @@ fn parse_route(subdomain: &str, port: &str) -> Result<Route, String> {
         .ok_or_else(|| format!("'{}' is not a port number (1 to 65535)", port.trim()))?;
     Ok(Route {
         backend: zevo_core::model::Backend::default(),
+        host: None,
         subdomain: (!subdomain.is_empty()).then_some(subdomain),
         port,
         path_prefix: None,
@@ -174,11 +175,15 @@ impl Shell {
         let mut project = draft.clone();
         project.name = form.name.read(cx).value().trim().to_string();
         project.slug = form.slug.read(cx).value().trim().to_string();
-        let routes: Result<Vec<Route>, String> = form
-            .rows
-            .iter()
-            .map(|row| parse_route(&row.subdomain.read(cx).value(), &row.port.read(cx).value()))
-            .collect();
+        let declared = project.declared;
+        let routes: Result<Vec<Route>, String> = if declared {
+            Ok(project.routes.clone())
+        } else {
+            form.rows
+                .iter()
+                .map(|row| parse_route(&row.subdomain.read(cx).value(), &row.port.read(cx).value()))
+                .collect()
+        };
         match routes {
             Ok(routes) => project.routes = routes,
             Err(e) => {
@@ -316,7 +321,22 @@ impl Shell {
                             cx,
                         )),
                 )
-                .child(
+                .child(if draft.declared {
+                    v_flex()
+                        .gap_2()
+                        .child(caption("Addresses", cx))
+                        .children(draft.routes.iter().map(|r| {
+                            let mut r = r.clone();
+                            r.target = zevo_core::model::Target::Container;
+                            h_flex()
+                                .gap_3()
+                                .child(mono(format!("{}{}", r.hostname(&slug, suffix), r.path_prefix.as_deref().unwrap_or("")), cx))
+                                .child(mono(format!("→ {}", r.port), cx).text_color(cx.theme().muted_foreground))
+                        }))
+                        .child(div().text_sm().text_color(cx.theme().muted_foreground).child(
+                            "Defined in this project's devcontainer.json (customizations.zevo). Zevo follows that file.",
+                        ))
+                } else {
                     v_flex()
                         .gap_2()
                         .child(caption("Addresses", cx))
@@ -346,8 +366,8 @@ impl Shell {
                                     cx.notify();
                                 }),
                             ),
-                        )),
-                )
+                        ))
+                })
                 .child(
                     h_flex()
                         .gap_2()

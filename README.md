@@ -67,6 +67,39 @@ More commands:
 
 Add `--json` to `ls`, `show`, `reconcile` and `doctor` for scripting.
 
+### Declaring routes in the repository
+
+A project can describe its own routes in `devcontainer.json`, so anyone who
+adds it gets the same addresses with nothing to type:
+
+```jsonc
+"customizations": {
+  "zevo": {
+    "name": "Shop",
+    "slug": "shop",
+    "routes": [
+      { "port": 3000 },                                  // shop.localhost
+      { "subdomain": "api", "port": 8080, "pathPrefix": "/v1" },
+      { "subdomains": ["admin", "docs"], "port": 4000 }, // several names, one port
+      { "subdomain": "vite", "port": 5173, "backend": "https" },
+      { "host": "local.example.com", "port": 9000 }      // an exact hostname
+    ]
+  }
+}
+```
+
+- `backend: "https"` is for dev servers with self-signed certificates: Traefik
+  connects over TLS without verifying, and sends the route's hostname as SNI.
+- `slug` is a suggestion. Give a second checkout of the same repository its
+  own short name (`zevo add <folder> --slug shop-lane2`) and it gets its own
+  addresses under `shop-lane2.localhost`.
+- Zevo re-reads the block on every reconcile, so editing the file updates the
+  routes. Declared routes cannot be edited in Zevo; remove the block to manage
+  them in Zevo instead.
+- Where the app runs is a fact about your machine, not the repository:
+  `zevo add <folder> --address host.docker.internal` points every declared
+  route at that address instead of the container.
+
 ### Adopting an existing Traefik
 
 `zevo setup` inspects running Traefik containers. To be adopted, a Traefik

@@ -22,15 +22,33 @@ pub fn draft(folder: &Path) -> Result<Project> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+
+    // A project that declares itself wins over guesses from its ports.
+    if let Some(declared) = detected.declared {
+        return Ok(Project {
+            slug: declared.slug.unwrap_or_else(|| slugify(&folder_name)),
+            name: declared.name.or(detected.name).unwrap_or(folder_name),
+            host: LOCAL_HOST_ID.to_string(),
+            path,
+            kind: detected.kind,
+            service: detected.service,
+            routes: declared.routes,
+            tags: Vec::new(),
+            declared: true,
+            address: None,
+        });
+    }
+
     let routes = detected
         .ports
         .first()
         .map(|port| Route {
-            backend: crate::model::Backend::default(),
             subdomain: None,
             port: *port,
             path_prefix: None,
             target: Target::Container,
+            backend: crate::model::Backend::default(),
+            host: None,
         })
         .into_iter()
         .collect();
@@ -43,7 +61,57 @@ pub fn draft(folder: &Path) -> Result<Project> {
         service: detected.service,
         routes,
         tags: Vec::new(),
+        declared: false,
+        address: None,
     })
+}
+
+/// Points every route of a declared project at `address`, or back at the
+/// container when there is none.
+pub fn apply_address(project: &mut Project) {
+    for route in &mut project.routes {
+        route.target = match &project.address {
+            Some(address) => Target::HostPort {
+                address: address.clone(),
+            },
+            None => Target::Container,
+        };
+    }
+}
+
+/// Re-reads a declared project's routes from its devcontainer.json. Returns
+/// the updated project if anything changed (already saved), `None` otherwise.
+/// A folder that is not visible from here is left alone.
+pub fn sync_declared(store: &Store, project: &Project) -> Result<Option<Project>> {
+    if !project.declared || !project.path.is_dir() {
+        return Ok(None);
+    }
+    let mut updated = project.clone();
+    match devcontainer::detect(&project.path)?.declared {
+        Some(declared) => {
+            updated.routes = declared.routes;
+            apply_address(&mut updated);
+        }
+        // The block was removed: keep the routes, now editable in Zevo.
+        None => updated.declared = false,
+    }
+    if updated == *project {
+        return Ok(None);
+    }
+    validate(store, &updated)?;
+    store.save_project(&updated)?;
+    Ok(Some(updated))
+}
+
+/// Fails for projects whose routes are defined in their repository.
+pub fn ensure_routes_editable(project: &Project) -> Result<()> {
+    if project.declared {
+        return Err(Error::Other(format!(
+            "the routes of '{}' are defined in its devcontainer.json (customizations.zevo); edit them there",
+            project.slug
+        )));
+    }
+    Ok(())
 }
 
 /// Replaces a leading `~` with the user's home folder, as a shell would.
@@ -79,7 +147,10 @@ fn validate(store: &Store, project: &Project) -> Result<()> {
                 "path prefix '{prefix}' must start with '/'"
             )));
         }
-        let key = (route.subdomain.clone(), route.path_prefix.clone());
+        let key = (
+            route.hostname(&project.slug, &settings.domain_suffix),
+            route.path_prefix.clone(),
+        );
         if seen.contains(&key) {
             return Err(Error::Other(format!(
                 "two routes use the address {}{}",
@@ -155,6 +226,77 @@ mod tests {
         assert_eq!(p.name, "plain");
         assert!(p.routes.is_empty());
         assert!(draft(&tmp.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn declared_projects_follow_their_devcontainer_json() {
+        let (tmp, store) = set_up();
+        let config = |routes: &str| {
+            format!(
+                r#"{{"image":"node","forwardPorts":[9999],"customizations":{{"zevo":{{"name":"Shop","routes":{routes}}}}}}}"#
+            )
+        };
+        let dir = folder(
+            tmp.path(),
+            "shop",
+            &config(r#"[{"port":3000},{"subdomain":"api","port":8080}]"#),
+        );
+        let p = draft(&dir).unwrap();
+        assert!(p.declared);
+        assert_eq!(p.name, "Shop");
+        // The declaration replaces the guess from forwardPorts.
+        assert_eq!(
+            p.routes.iter().map(|r| r.port).collect::<Vec<_>>(),
+            [3000, 8080]
+        );
+        add(&store, &p).unwrap();
+        assert!(ensure_routes_editable(&p).is_err());
+        assert_eq!(sync_declared(&store, &p).unwrap(), None);
+
+        // Editing the file changes the routes on the next sync.
+        std::fs::write(
+            dir.join(".devcontainer/devcontainer.json"),
+            config(r#"[{"port":3000}]"#),
+        )
+        .unwrap();
+        let updated = sync_declared(&store, &p).unwrap().unwrap();
+        assert_eq!(updated.routes.len(), 1);
+        assert_eq!(store.project("shop").unwrap(), updated);
+
+        // A machine-level address applies to every declared route.
+        let mut remote = updated.clone();
+        remote.address = Some("host.docker.internal".into());
+        store.save_project(&remote).unwrap();
+        std::fs::write(
+            dir.join(".devcontainer/devcontainer.json"),
+            config(r#"[{"port":3000},{"subdomain":"x","port":1}]"#),
+        )
+        .unwrap();
+        let synced = sync_declared(&store, &remote).unwrap().unwrap();
+        assert!(synced.routes.iter().all(|r| r.target
+            == Target::HostPort {
+                address: "host.docker.internal".into()
+            }));
+
+        // A broken declaration is an error and changes nothing.
+        std::fs::write(
+            dir.join(".devcontainer/devcontainer.json"),
+            config(r#"[{"prot":3000}]"#),
+        )
+        .unwrap();
+        assert!(sync_declared(&store, &synced).is_err());
+        assert_eq!(store.project("shop").unwrap(), synced);
+
+        // Removing the block hands the routes back to Zevo.
+        std::fs::write(
+            dir.join(".devcontainer/devcontainer.json"),
+            r#"{"image":"node"}"#,
+        )
+        .unwrap();
+        let freed = sync_declared(&store, &synced).unwrap().unwrap();
+        assert!(!freed.declared);
+        assert_eq!(freed.routes.len(), 2);
+        assert!(ensure_routes_editable(&freed).is_ok());
     }
 
     #[test]

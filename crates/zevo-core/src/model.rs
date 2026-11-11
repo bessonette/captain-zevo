@@ -117,10 +117,17 @@ pub struct Route {
     pub target: Target,
     #[serde(default, skip_serializing_if = "Backend::is_http")]
     pub backend: Backend,
+    /// Exact hostname, for addresses outside `<slug>.<suffix>`. Overrides
+    /// `subdomain`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
 
 impl Route {
     pub fn hostname(&self, slug: &str, suffix: &str) -> String {
+        if let Some(host) = &self.host {
+            return host.to_lowercase();
+        }
         match &self.subdomain {
             Some(sub) => format!("{sub}.{slug}.{suffix}"),
             None => format!("{slug}.{suffix}"),
@@ -147,6 +154,14 @@ pub struct Project {
     pub routes: Vec<Route>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// Routes come from `customizations.zevo` in the project's
+    /// devcontainer.json and are re-read from there on every reconcile.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub declared: bool,
+    /// Reach the project at this address instead of its container (another
+    /// machine, or a port forwarded to this one). Applies to declared routes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
 }
 
 fn default_host() -> String {
@@ -203,6 +218,7 @@ mod tests {
     fn hostnames() {
         let r = Route {
             backend: Backend::Http,
+            host: None,
             subdomain: None,
             port: 3000,
             path_prefix: None,
@@ -211,6 +227,7 @@ mod tests {
         assert_eq!(r.hostname("shop", "localhost"), "shop.localhost");
         let r = Route {
             backend: Backend::Http,
+            host: None,
             subdomain: Some("api".into()),
             ..r
         };

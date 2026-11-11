@@ -8,7 +8,7 @@ use serde::Serialize;
 use crate::model::{LOCAL_HOST_ID, Project, Settings, Target};
 use crate::runtime::{ContainerInfo, Runtime};
 use crate::store::Store;
-use crate::{Error, Result, setup, traefik};
+use crate::{Error, Result, register, setup, traefik};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
@@ -117,8 +117,17 @@ pub async fn reconcile(store: &Store, runtime: Option<&dyn Runtime>) -> Result<R
     let Some(traefik_settings) = &settings.traefik else {
         return Err(Error::NotSetUp);
     };
-    let projects = store.projects()?;
+    let mut projects = store.projects()?;
     let mut report = Report::default();
+
+    // Projects that declare their routes in devcontainer.json are re-read first.
+    for project in &mut projects {
+        match register::sync_declared(store, project) {
+            Ok(Some(updated)) => *project = updated,
+            Ok(None) => {}
+            Err(e) => report.warnings.push(format!("{}: {e}", project.slug)),
+        }
+    }
 
     let needs_network = |p: &Project| {
         p.host == LOCAL_HOST_ID && p.routes.iter().any(|r| r.target == Target::Container)
@@ -245,6 +254,8 @@ mod tests {
 
     fn project(slug: &str, path: &str) -> Project {
         Project {
+            declared: false,
+            address: None,
             slug: slug.into(),
             name: slug.into(),
             host: LOCAL_HOST_ID.into(),
@@ -253,6 +264,7 @@ mod tests {
             service: None,
             routes: vec![Route {
                 backend: crate::model::Backend::default(),
+                host: None,
                 subdomain: None,
                 port: 3000,
                 path_prefix: None,
