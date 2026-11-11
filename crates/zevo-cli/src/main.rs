@@ -6,11 +6,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
-use zevo_core::model::{LOCAL_HOST_ID, Project, Route, Target, slugify};
+use zevo_core::model::{Route, Target};
 use zevo_core::reconcile::{self, Action, ContainerState, Report};
 use zevo_core::runtime::{DockerRuntime, Runtime};
 use zevo_core::store::Store;
-use zevo_core::{devcontainer, doctor, setup, traefik};
+use zevo_core::{doctor, register, setup, traefik};
 
 #[derive(Parser)]
 #[command(
@@ -192,11 +192,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Command::Setup(args) => cmd_setup(&store, args).await?,
         Command::Add(args) => cmd_add(&store, args, cli.json).await?,
         Command::Rm { slug } => {
-            let settings = store.settings()?;
-            store.remove_project(&slug)?;
-            if let Some(t) = &settings.traefik {
-                traefik::remove_project(&slug, &t.dynamic_dir)?;
-            }
+            register::remove(&store, &slug)?;
             println!("Removed {slug}.");
         }
         Command::Ls => {
@@ -358,47 +354,29 @@ async fn cmd_setup(store: &Store, args: SetupArgs) -> Result<()> {
 
 async fn cmd_add(store: &Store, args: AddArgs, json: bool) -> Result<()> {
     let settings = store.settings()?;
-    if settings.traefik.is_none() {
-        bail!(zevo_core::Error::NotSetUp);
+    let mut project = register::draft(&args.path)?;
+    if let Some(slug) = args.slug {
+        project.slug = slug;
     }
-    let path = std::fs::canonicalize(&args.path)
-        .with_context(|| format!("cannot open {}", args.path.display()))?;
-    if !path.is_dir() {
-        bail!("{} is not a directory", path.display());
+    if let Some(name) = args.name {
+        project.name = name;
     }
-    let detected = devcontainer::detect(&path)?;
-    let folder_name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let slug = args.slug.unwrap_or_else(|| slugify(&folder_name));
-
-    let mut routes = Vec::new();
-    for spec in &args.routes {
-        routes.push(parse_route(spec, args.address.as_deref(), None)?);
+    project.tags = args.tags;
+    if !args.routes.is_empty() {
+        project.routes.clear();
+        for spec in &args.routes {
+            project
+                .routes
+                .push(parse_route(spec, args.address.as_deref(), None)?);
+        }
+    } else if let Some(address) = &args.address {
+        for route in &mut project.routes {
+            route.target = Target::HostPort {
+                address: address.clone(),
+            };
+        }
     }
-    if routes.is_empty()
-        && let Some(port) = detected.ports.first()
-    {
-        routes.push(parse_route(
-            &port.to_string(),
-            args.address.as_deref(),
-            None,
-        )?);
-    }
-
-    let project = Project {
-        name: args.name.or(detected.name).unwrap_or(folder_name),
-        slug,
-        host: LOCAL_HOST_ID.to_string(),
-        path,
-        kind: detected.kind,
-        service: detected.service,
-        routes,
-        tags: args.tags,
-    };
-    traefik::check_conflicts(&project, &settings)?;
-    store.add_project(&project)?;
+    register::add(store, &project)?;
     let report = reconcile_once(store).await?;
 
     if json {
@@ -435,7 +413,6 @@ async fn cmd_route(store: &Store, command: RouteCommand) -> Result<()> {
             project
                 .routes
                 .push(parse_route(&route, address.as_deref(), path_prefix)?);
-            traefik::check_conflicts(&project, &settings)?;
             project
         }
         RouteCommand::Rm { slug, subdomain } => {
@@ -448,7 +425,7 @@ async fn cmd_route(store: &Store, command: RouteCommand) -> Result<()> {
             project
         }
     };
-    store.save_project(&project)?;
+    register::update(store, &project)?;
     let report = reconcile_once(store).await?;
     for url in reconcile::urls(&project, &settings) {
         println!("  {url}");

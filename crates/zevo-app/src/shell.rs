@@ -25,6 +25,9 @@ use zevo_core::reconcile::ContainerState;
 use crate::Refresh;
 use crate::backend::{Backend, ProjectView, Snapshot};
 
+mod add;
+mod setup;
+
 const LOGO: &[u8] = include_bytes!("../../../assets/logo.svg");
 
 #[derive(Clone, PartialEq)]
@@ -34,6 +37,7 @@ enum Page {
     Project(String),
     Traefik,
     Settings,
+    Add,
 }
 
 pub struct Shell {
@@ -47,6 +51,8 @@ pub struct Shell {
     search: Entity<InputState>,
     logo: Arc<Image>,
     focus: FocusHandle,
+    add: Option<add::AddForm>,
+    setup: setup::SetupState,
     _search_changed: Subscription,
 }
 
@@ -74,6 +80,8 @@ impl Shell {
             search,
             logo: Arc::new(Image::from_bytes(ImageFormat::Svg, LOGO.to_vec())),
             focus: cx.focus_handle(),
+            add: None,
+            setup: setup::SetupState::default(),
             _search_changed,
         };
         shell.reload(cx);
@@ -91,9 +99,13 @@ impl Shell {
     }
 
     fn reload(&mut self, cx: &mut Context<Self>) {
-        if self.loading {
-            return;
+        if !self.loading {
+            self.reload_now(cx);
         }
+    }
+
+    /// Reloads even if a load is already running, for use right after a change.
+    fn reload_now(&mut self, cx: &mut Context<Self>) {
         self.loading = true;
         let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
@@ -102,6 +114,9 @@ impl Shell {
                 this.loading = false;
                 match result {
                     Ok(snapshot) => {
+                        if snapshot.needs_setup() && !this.setup_searched() {
+                            this.find_traefik(cx);
+                        }
                         this.snapshot = Some(snapshot);
                         this.error = None;
                     }
@@ -383,6 +398,14 @@ impl Shell {
                         .tooltip("Refresh")
                         .loading(self.loading)
                         .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
+                )
+                .child(
+                    Button::new("add-project")
+                        .primary()
+                        .small()
+                        .icon(IconName::Plus)
+                        .label("Add project")
+                        .on_click(cx.listener(|this, _, window, cx| this.open_add(window, cx))),
                 ),
             cx,
         );
@@ -402,7 +425,7 @@ impl Shell {
 
         let body = if rows.is_empty() {
             let message = if snapshot.projects.is_empty() {
-                "No projects yet. Register one with: zevo add <folder>"
+                "No projects yet. Choose Add project to register a folder."
             } else {
                 "No projects match. Clear the search to see them all."
             };
@@ -515,12 +538,12 @@ impl Shell {
                         .outline()
                         .label("Remove")
                         .on_click(cx.listener(move |_, _, window, cx| {
-                        let shell = cx.entity().downgrade();
-                        let slug = slug.clone();
-                        window.open_dialog(cx, move |dialog, _, _| {
-                            let shell = shell.clone();
+                            let shell = cx.entity().downgrade();
                             let slug = slug.clone();
-                            dialog
+                            window.open_dialog(cx, move |dialog, _, _| {
+                                let shell = shell.clone();
+                                let slug = slug.clone();
+                                dialog
                                 .title(format!("Remove {slug}?"))
                                 .child(
                                     "Zevo forgets this project and deletes its Traefik route file. \
@@ -539,8 +562,8 @@ impl Shell {
                                     });
                                     true
                                 })
-                        });
-                    })),
+                            });
+                        })),
                 )
                 .when_some(first_url, |row, url| {
                     row.child(
@@ -620,10 +643,7 @@ impl Shell {
                     )
                     .child(v_flex().gap_2().child(caption("Addresses", cx)).children(
                         if view.status.urls.is_empty() {
-                            vec![div().text_color(cx.theme().muted_foreground).child(format!(
-                                "No routes yet. Add one with: zevo route add {} PORT",
-                                p.slug
-                            ))]
+                            vec![div().text_color(cx.theme().muted_foreground).child("No routes yet. Add one on the Routes tab to give this project an address.")]
                         } else {
                             view.status
                                 .urls
@@ -655,9 +675,11 @@ impl Shell {
                         .child(caption("Address", cx).flex_1())
                         .child(caption("Sends to", cx).flex_1())
                         .child(caption("Port", cx).w(px(70.)))
-                        .child(caption("Path", cx).w(px(90.))),
+                        .child(caption("Path", cx).w(px(90.)))
+                        .child(div().w(px(32.))),
                 )
-                .children(p.routes.iter().map(|r| {
+                .children(p.routes.iter().enumerate().map(|(ix, r)| {
+                    let project = p.clone();
                     h_flex()
                         .py_2()
                         .gap_3()
@@ -676,6 +698,16 @@ impl Shell {
                             mono(r.path_prefix.clone().unwrap_or_else(|| "/".into()), cx)
                                 .w(px(90.)),
                         )
+                        .child(
+                            Button::new(("remove-route", ix))
+                                .ghost()
+                                .small()
+                                .icon(IconName::Close)
+                                .tooltip("Remove this route")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.remove_route(project.clone(), ix, window, cx)
+                                })),
+                        )
                 }))
                 .when(p.routes.is_empty(), |list| {
                     list.child(
@@ -684,7 +716,17 @@ impl Shell {
                             .text_color(cx.theme().muted_foreground)
                             .child("No routes yet."),
                     )
-                }),
+                })
+                .child(h_flex().pt_3().child({
+                    let project = p.clone();
+                    Button::new("add-route")
+                        .small()
+                        .icon(IconName::Plus)
+                        .label("Add route")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.ask_new_route(project.clone(), window, cx)
+                        }))
+                })),
             _ => v_flex()
                 .gap_2()
                 .child(
@@ -894,6 +936,8 @@ impl Render for Shell {
         };
 
         let page = match self.page.clone() {
+            _ if snapshot.needs_setup() => self.render_setup(&snapshot, cx),
+            Page::Add => self.render_add(&snapshot, cx),
             Page::Projects(filter) => self.render_projects(&snapshot, &filter, cx),
             Page::Project(slug) => {
                 match snapshot.projects.iter().find(|p| p.project.slug == slug) {
@@ -910,15 +954,6 @@ impl Render for Shell {
             .flex_shrink_0()
             .when_some(self.error.clone(), |col, e| {
                 col.child(Alert::error("refresh-error", e).banner())
-            })
-            .when(snapshot.needs_setup(), |col| {
-                col.child(
-                    Alert::warning(
-                        "needs-setup",
-                        "Traefik is not set up yet. Run `zevo setup` in a terminal, then refresh.",
-                    )
-                    .banner(),
-                )
             })
             .children(
                 snapshot

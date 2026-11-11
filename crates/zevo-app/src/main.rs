@@ -15,7 +15,10 @@ actions!(zevo, [Quit, Refresh]);
 fn main() {
     // `--demo` shows example projects and touches nothing on this machine.
     let demo = std::env::args().any(|a| a == "--demo");
-    let backend: Arc<dyn Backend> = if demo {
+    let backend: Arc<dyn Backend> = if demo && std::env::args().any(|a| a == "--fresh") {
+        // Example data as on a machine where setup has not run yet.
+        Arc::new(DemoBackend::fresh())
+    } else if demo {
         Arc::new(DemoBackend::default())
     } else {
         match SystemBackend::new() {

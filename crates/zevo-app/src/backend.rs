@@ -3,14 +3,16 @@
 //!
 //! Methods block; call them from a background task, never the UI thread.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use zevo_core::model::{
     DevcontainerKind, LOCAL_HOST_ID, Project, Route, Settings, Target, TraefikMode, TraefikSettings,
 };
 use zevo_core::reconcile::{self, ContainerState, ProjectStatus};
+use zevo_core::register;
 use zevo_core::runtime::{DockerRuntime, Runtime};
+use zevo_core::setup::{self, Candidate};
 use zevo_core::store::Store;
 use zevo_core::traefik::{self, RouterInfo};
 
@@ -57,6 +59,16 @@ pub trait Backend: Send + Sync + 'static {
     /// Reconciles, then reports the resulting state.
     fn load(&self) -> Result<Snapshot, String>;
     fn remove_project(&self, slug: &str) -> Result<(), String>;
+    /// Inspects a folder and proposes a project for it, without saving.
+    fn draft(&self, folder: &str) -> Result<Project, String>;
+    fn add_project(&self, project: &Project) -> Result<(), String>;
+    /// Saves changes to an existing project.
+    fn save_project(&self, project: &Project) -> Result<(), String>;
+    /// Traefik containers found on this machine, for first-run setup.
+    fn traefik_candidates(&self) -> Result<Vec<Candidate>, String>;
+    fn adopt(&self, container: &str) -> Result<(), String>;
+    /// Starts a Zevo-managed Traefik.
+    fn bootstrap(&self) -> Result<(), String>;
 }
 
 /// The real system: the on-disk registry and the local container runtime.
@@ -143,18 +155,80 @@ impl Backend for SystemBackend {
     }
 
     fn remove_project(&self, slug: &str) -> Result<(), String> {
-        let settings = self.store.settings().map_err(|e| e.to_string())?;
-        self.store.remove_project(slug).map_err(|e| e.to_string())?;
-        if let Some(t) = &settings.traefik {
-            traefik::remove_project(slug, &t.dynamic_dir).map_err(|e| e.to_string())?;
-        }
-        Ok(())
+        register::remove(&self.store, slug).map_err(|e| e.to_string())
+    }
+
+    fn draft(&self, folder: &str) -> Result<Project, String> {
+        register::draft(Path::new(folder.trim())).map_err(|e| e.to_string())
+    }
+
+    fn add_project(&self, project: &Project) -> Result<(), String> {
+        register::add(&self.store, project).map_err(|e| e.to_string())
+    }
+
+    fn save_project(&self, project: &Project) -> Result<(), String> {
+        register::update(&self.store, project).map_err(|e| e.to_string())
+    }
+
+    fn traefik_candidates(&self) -> Result<Vec<Candidate>, String> {
+        self.tokio.block_on(async {
+            let docker = DockerRuntime::connect().map_err(|e| e.to_string())?;
+            setup::find_traefik(&docker)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    fn adopt(&self, container: &str) -> Result<(), String> {
+        self.tokio.block_on(async {
+            let docker = DockerRuntime::connect().map_err(|e| e.to_string())?;
+            let found = setup::find_traefik(&docker)
+                .await
+                .map_err(|e| e.to_string())?;
+            let candidate = found
+                .iter()
+                .find(|c| c.container == container)
+                .ok_or_else(|| format!("Traefik container '{container}' is no longer there"))?;
+            setup::adopt(&self.store, &docker, candidate)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    fn bootstrap(&self) -> Result<(), String> {
+        self.tokio.block_on(async {
+            let docker = DockerRuntime::connect().map_err(|e| e.to_string())?;
+            setup::bootstrap(&self.store, &docker, None)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
     }
 }
 
 /// Example data for `--demo`, screenshots and tests. Touches nothing real.
 pub struct DemoBackend {
     projects: Mutex<Vec<(Project, ContainerState, Option<&'static str>)>>,
+    set_up: Mutex<bool>,
+}
+
+impl DemoBackend {
+    /// Starts as a machine where `zevo setup` has not run yet.
+    pub fn fresh() -> Self {
+        let demo = Self::default();
+        demo.projects.lock().unwrap().clear();
+        *demo.set_up.lock().unwrap() = false;
+        demo
+    }
+
+    fn check(&self, project: &Project) -> Result<(), String> {
+        zevo_core::model::validate_slug(&project.slug).map_err(|e| e.to_string())?;
+        if project.name.trim().is_empty() {
+            return Err("the project needs a name".into());
+        }
+        Ok(())
+    }
 }
 
 impl Default for DemoBackend {
@@ -278,6 +352,7 @@ impl Default for DemoBackend {
                     None,
                 ),
             ]),
+            set_up: Mutex::new(true),
         }
     }
 }
@@ -285,7 +360,7 @@ impl Default for DemoBackend {
 impl Backend for DemoBackend {
     fn load(&self) -> Result<Snapshot, String> {
         let settings = Settings {
-            traefik: Some(TraefikSettings {
+            traefik: self.set_up.lock().unwrap().then(|| TraefikSettings {
                 mode: TraefikMode::Adopted,
                 container: Some("traefik".into()),
                 dynamic_dir: "/home/dev/traefik/dynamic".into(),
@@ -295,17 +370,14 @@ impl Backend for DemoBackend {
             ..Settings::default()
         };
         let projects = self.projects.lock().unwrap();
+        let has_billing = projects.iter().any(|(p, _, _)| p.slug == "billing");
         let mut routers = Vec::new();
         let views = projects
             .iter()
             .map(|(project, state, container)| {
                 for r in &project.routes {
                     routers.push(RouterInfo {
-                        file: settings
-                            .traefik
-                            .as_ref()
-                            .unwrap()
-                            .dynamic_dir
+                        file: PathBuf::from("/home/dev/traefik/dynamic")
                             .join(traefik::file_name(&project.slug)),
                         router: format!("zevo-{}", project.slug),
                         hostnames: vec![r.hostname(&project.slug, &settings.domain_suffix)],
@@ -344,10 +416,14 @@ impl Backend for DemoBackend {
             projects: views,
             routers,
             runtime: Ok("Docker Engine 29.7 (example)".into()),
-            warnings: vec![
-                "billing: on host 'buildbox', which is not managed yet; use host-port routes"
-                    .into(),
-            ],
+            warnings: if has_billing {
+                vec![
+                    "billing: on host 'buildbox', which is not managed yet; use host-port routes"
+                        .into(),
+                ]
+            } else {
+                Vec::new()
+            },
         })
     }
 
@@ -356,6 +432,80 @@ impl Backend for DemoBackend {
             .lock()
             .unwrap()
             .retain(|(p, _, _)| p.slug != slug);
+        Ok(())
+    }
+
+    fn draft(&self, folder: &str) -> Result<Project, String> {
+        let folder = folder.trim();
+        if folder.is_empty() {
+            return Err("enter a folder".into());
+        }
+        let name = folder
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or(folder);
+        Ok(Project {
+            slug: zevo_core::model::slugify(name),
+            name: name.to_string(),
+            host: LOCAL_HOST_ID.into(),
+            path: PathBuf::from(folder),
+            kind: DevcontainerKind::Compose,
+            service: Some("app".into()),
+            routes: vec![Route {
+                subdomain: None,
+                port: 5173,
+                path_prefix: None,
+                target: Target::Container,
+            }],
+            tags: Vec::new(),
+        })
+    }
+
+    fn add_project(&self, project: &Project) -> Result<(), String> {
+        self.check(project)?;
+        let mut projects = self.projects.lock().unwrap();
+        if projects.iter().any(|(p, _, _)| p.slug == project.slug) {
+            return Err(format!("project '{}' is already registered", project.slug));
+        }
+        projects.push((
+            project.clone(),
+            ContainerState::Running,
+            Some("example-container-1"),
+        ));
+        Ok(())
+    }
+
+    fn save_project(&self, project: &Project) -> Result<(), String> {
+        self.check(project)?;
+        let mut projects = self.projects.lock().unwrap();
+        match projects.iter_mut().find(|(p, _, _)| p.slug == project.slug) {
+            Some(entry) => {
+                entry.0 = project.clone();
+                Ok(())
+            }
+            None => Err(format!("project '{}' is not registered", project.slug)),
+        }
+    }
+
+    fn traefik_candidates(&self) -> Result<Vec<Candidate>, String> {
+        Ok(vec![Candidate {
+            container: "traefik".into(),
+            running: true,
+            dynamic_dir: Some("/home/dev/traefik/dynamic".into()),
+            entrypoint: Some("web".into()),
+            http_port: Some(80),
+            problems: Vec::new(),
+        }])
+    }
+
+    fn adopt(&self, _container: &str) -> Result<(), String> {
+        *self.set_up.lock().unwrap() = true;
+        Ok(())
+    }
+
+    fn bootstrap(&self) -> Result<(), String> {
+        *self.set_up.lock().unwrap() = true;
         Ok(())
     }
 }
