@@ -20,13 +20,13 @@
 		"ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {},
 		// Gives the container the host's Docker, for trying `zevo` against real containers.
 		"ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
-	}
+	},
 
 	// Use 'forwardPorts' to make a list of ports inside the container available locally.
 	// "forwardPorts": [],
 
-	// Use 'postCreateCommand' to run commands after the container is created.
-	// "postCreateCommand": "rustc --version",
+	// Keeps Claude Code's state in the git-ignored .claude-home folder across rebuilds.
+	"postStartCommand": "sh .devcontainer/link-claude-home.sh",
 
 	// Configure tool-specific properties.
 	// "customizations": {},
