@@ -142,7 +142,12 @@ impl Backend for SystemBackend {
                         .find(|s| s.slug == project.slug)
                         .cloned()
                         .unwrap_or_else(|| unknown(&project));
-                    let yaml = traefik::render(&project, &snapshot.settings).unwrap_or_default();
+                    let yaml = traefik::render_for(
+                        &project,
+                        &snapshot.settings,
+                        status.container.as_deref(),
+                    )
+                    .unwrap_or_default();
                     ProjectView {
                         project,
                         status,
@@ -237,6 +242,7 @@ impl Default for DemoBackend {
                      port: u16,
                      prefix: Option<&str>,
                      address: Option<&str>| Route {
+            backend: zevo_core::model::Backend::default(),
             subdomain: subdomain.map(Into::into),
             port,
             path_prefix: prefix.map(Into::into),
@@ -361,6 +367,7 @@ impl Backend for DemoBackend {
     fn load(&self) -> Result<Snapshot, String> {
         let settings = Settings {
             traefik: self.set_up.lock().unwrap().then(|| TraefikSettings {
+                tls: false,
                 mode: TraefikMode::Adopted,
                 container: Some("traefik".into()),
                 dynamic_dir: "/home/dev/traefik/dynamic".into(),
@@ -453,6 +460,7 @@ impl Backend for DemoBackend {
             kind: DevcontainerKind::Compose,
             service: Some("app".into()),
             routes: vec![Route {
+                backend: zevo_core::model::Backend::default(),
                 subdomain: None,
                 port: 5173,
                 path_prefix: None,
@@ -493,8 +501,10 @@ impl Backend for DemoBackend {
             container: "traefik".into(),
             running: true,
             dynamic_dir: Some("/home/dev/traefik/dynamic".into()),
-            entrypoint: Some("web".into()),
-            http_port: Some(80),
+            entrypoint: Some("websecure".into()),
+            http_port: Some(443),
+            tls: true,
+            network: Some("proxy".into()),
             problems: Vec::new(),
         }])
     }

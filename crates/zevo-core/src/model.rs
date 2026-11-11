@@ -61,6 +61,9 @@ pub struct TraefikSettings {
     pub entrypoint: String,
     /// Host port of that entrypoint, used to build URLs.
     pub http_port: u16,
+    /// Whether that entrypoint serves HTTPS (routes then get `tls: {}`).
+    #[serde(default)]
+    pub tls: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -84,6 +87,23 @@ pub enum Target {
     HostPort { address: String },
 }
 
+/// How Traefik talks to the app behind a route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Backend {
+    #[default]
+    Http,
+    /// TLS without certificate checks (dev servers use self-signed
+    /// certificates), sending the route's hostname as SNI.
+    Https,
+}
+
+impl Backend {
+    fn is_http(&self) -> bool {
+        *self == Backend::Http
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Route {
     /// `None` serves `<slug>.<suffix>`; `Some("api")` serves `api.<slug>.<suffix>`.
@@ -95,6 +115,8 @@ pub struct Route {
     pub path_prefix: Option<String>,
     #[serde(default)]
     pub target: Target,
+    #[serde(default, skip_serializing_if = "Backend::is_http")]
+    pub backend: Backend,
 }
 
 impl Route {
@@ -180,6 +202,7 @@ mod tests {
     #[test]
     fn hostnames() {
         let r = Route {
+            backend: Backend::Http,
             subdomain: None,
             port: 3000,
             path_prefix: None,
@@ -187,6 +210,7 @@ mod tests {
         };
         assert_eq!(r.hostname("shop", "localhost"), "shop.localhost");
         let r = Route {
+            backend: Backend::Http,
             subdomain: Some("api".into()),
             ..r
         };

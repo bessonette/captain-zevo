@@ -73,6 +73,9 @@ struct SetupArgs {
     /// Entrypoint name to use with --dynamic-dir.
     #[arg(long, requires = "dynamic_dir")]
     entrypoint: Option<String>,
+    /// With --dynamic-dir: the entrypoint serves HTTPS.
+    #[arg(long, requires = "dynamic_dir")]
+    tls: bool,
 }
 
 #[derive(Args)]
@@ -174,6 +177,7 @@ fn parse_route(spec: &str, address: Option<&str>, path_prefix: Option<String>) -
         bail!("path prefix must start with '/'");
     }
     Ok(Route {
+        backend: zevo_core::model::Backend::default(),
         subdomain,
         port,
         path_prefix,
@@ -288,7 +292,8 @@ async fn reconcile_once(store: &Store) -> Result<Report> {
 
 async fn cmd_setup(store: &Store, args: SetupArgs) -> Result<()> {
     if let (Some(dir), Some(entrypoint)) = (&args.dynamic_dir, &args.entrypoint) {
-        setup::adopt_manual(store, dir, entrypoint, args.port.unwrap_or(80))?;
+        let port = args.port.unwrap_or(if args.tls { 443 } else { 80 });
+        setup::adopt_manual(store, dir, entrypoint, port, args.tls)?;
         println!("Using Traefik routes directory {}.", dir.display());
         println!("Zevo cannot attach containers to this Traefik; add projects with --address.");
         return Ok(());

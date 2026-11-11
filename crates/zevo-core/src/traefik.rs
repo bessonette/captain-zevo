@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::model::{Project, Settings, Target, TraefikSettings, validate_slug};
+use crate::model::{Backend, Project, Settings, Target, TraefikSettings, validate_slug};
 use crate::{Error, Result};
 
 /// First line of every file Zevo manages.
@@ -42,13 +42,32 @@ struct Http {
     routers: BTreeMap<String, Router>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     services: BTreeMap<String, Service>,
+    #[serde(
+        rename = "serversTransports",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    servers_transports: BTreeMap<String, ServersTransport>,
 }
+
+#[derive(Serialize)]
+struct ServersTransport {
+    #[serde(rename = "serverName")]
+    server_name: String,
+    #[serde(rename = "insecureSkipVerify")]
+    insecure_skip_verify: bool,
+}
+
+/// Serializes as `{}`, which is how Traefik spells "TLS on, default options".
+#[derive(Serialize)]
+struct Tls {}
 
 #[derive(Serialize)]
 struct Router {
     rule: String,
     #[serde(rename = "entryPoints")]
     entry_points: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tls: Option<Tls>,
     service: String,
 }
 
@@ -60,6 +79,8 @@ struct Service {
 
 #[derive(Serialize)]
 struct LoadBalancer {
+    #[serde(rename = "serversTransport", skip_serializing_if = "Option::is_none")]
+    servers_transport: Option<String>,
     servers: Vec<Server>,
 }
 
@@ -104,9 +125,20 @@ fn url_host(address: &str) -> String {
 
 /// YAML for a project, header included. Output is deterministic.
 pub fn render(project: &Project, settings: &Settings) -> Result<String> {
+    render_for(project, settings, None)
+}
+
+/// Like [`render`], with the name Traefik should use to reach the project's
+/// container. Without one, container routes point at the project slug.
+pub fn render_for(
+    project: &Project,
+    settings: &Settings,
+    container: Option<&str>,
+) -> Result<String> {
     let traefik = traefik_settings(settings)?;
     let mut routers = BTreeMap::new();
     let mut services = BTreeMap::new();
+    let mut servers_transports = BTreeMap::new();
 
     for (route, name) in project.routes.iter().zip(route_names(project)) {
         let hostname = route.hostname(&project.slug, &settings.domain_suffix);
@@ -115,7 +147,7 @@ pub fn render(project: &Project, settings: &Settings) -> Result<String> {
             rule.push_str(&format!(" && PathPrefix(`{prefix}`)"));
         }
         let host = match &route.target {
-            Target::Container => project.slug.clone(),
+            Target::Container => container.unwrap_or(&project.slug).to_string(),
             Target::HostPort { address } => url_host(address),
         };
         routers.insert(
@@ -123,15 +155,32 @@ pub fn render(project: &Project, settings: &Settings) -> Result<String> {
             Router {
                 rule,
                 entry_points: vec![traefik.entrypoint.clone()],
+                tls: traefik.tls.then_some(Tls {}),
                 service: name.clone(),
             },
         );
+        let scheme = match route.backend {
+            Backend::Http => "http",
+            Backend::Https => {
+                // The dialed address is rarely the name the app expects, so
+                // present the public hostname as SNI.
+                servers_transports.insert(
+                    name.clone(),
+                    ServersTransport {
+                        server_name: hostname.clone(),
+                        insecure_skip_verify: true,
+                    },
+                );
+                "https"
+            }
+        };
         services.insert(
-            name,
+            name.clone(),
             Service {
                 load_balancer: LoadBalancer {
+                    servers_transport: (route.backend == Backend::Https).then(|| name.clone()),
                     servers: vec![Server {
-                        url: format!("http://{host}:{}", route.port),
+                        url: format!("{scheme}://{host}:{}", route.port),
                     }],
                 },
             },
@@ -139,7 +188,11 @@ pub fn render(project: &Project, settings: &Settings) -> Result<String> {
     }
 
     let doc = Doc {
-        http: Http { routers, services },
+        http: Http {
+            routers,
+            services,
+            servers_transports,
+        },
     };
     let body = serde_norway::to_string(&doc).map_err(|e| {
         Error::Other(format!(
@@ -186,9 +239,18 @@ fn not_managed(path: &Path) -> Error {
 /// Refuses (with an error) to overwrite an existing `zevo-<slug>.yml` that
 /// lacks the managed header. The dynamic directory must already exist.
 pub fn write_project(project: &Project, settings: &Settings) -> Result<bool> {
+    write_project_for(project, settings, None)
+}
+
+/// Like [`write_project`], routing container targets to the named container.
+pub fn write_project_for(
+    project: &Project,
+    settings: &Settings,
+    container: Option<&str>,
+) -> Result<bool> {
     validate_slug(&project.slug)?;
     let dir = &traefik_settings(settings)?.dynamic_dir;
-    let content = render(project, settings)?;
+    let content = render_for(project, settings, container)?;
     let path = dir.join(file_name(&project.slug));
 
     if let Some(existing) = read_optional(&path)? {
@@ -452,6 +514,7 @@ mod tests {
     fn settings(dir: &Path) -> Settings {
         Settings {
             traefik: Some(TraefikSettings {
+                tls: false,
                 mode: TraefikMode::Managed,
                 container: Some("zevo-traefik".into()),
                 dynamic_dir: dir.to_path_buf(),
@@ -464,6 +527,7 @@ mod tests {
 
     fn route(sub: Option<&str>, port: u16) -> Route {
         Route {
+            backend: crate::model::Backend::default(),
             subdomain: sub.map(Into::into),
             port,
             path_prefix: None,
@@ -491,10 +555,12 @@ mod tests {
                 route(None, 3000),
                 route(Some("api"), 8080),
                 Route {
+                    backend: crate::model::Backend::default(),
                     path_prefix: Some("/v2".into()),
                     ..route(Some("api"), 8081)
                 },
                 Route {
+                    backend: crate::model::Backend::default(),
                     target: Target::HostPort {
                         address: "192.168.1.20".into(),
                     },
@@ -576,6 +642,51 @@ http:
     }
 
     #[test]
+    fn render_https_front_backend_and_container_name() {
+        let mut s = settings(Path::new("/x"));
+        s.traefik.as_mut().unwrap().entrypoint = "websecure".into();
+        s.traefik.as_mut().unwrap().tls = true;
+        let mut p = project("shop", vec![route(None, 3000), route(Some("vite"), 5173)]);
+        p.routes[1].backend = Backend::Https;
+        let yaml = render_for(&p, &s, Some("vsc-shop-1")).unwrap();
+        assert_eq!(
+            yaml,
+            format!(
+                "{MANAGED_HEADER}
+http:
+  routers:
+    zevo-shop:
+      rule: Host(`shop.localhost`)
+      entryPoints:
+      - websecure
+      tls: {{}}
+      service: zevo-shop
+    zevo-shop-vite:
+      rule: Host(`vite.shop.localhost`)
+      entryPoints:
+      - websecure
+      tls: {{}}
+      service: zevo-shop-vite
+  services:
+    zevo-shop:
+      loadBalancer:
+        servers:
+        - url: http://vsc-shop-1:3000
+    zevo-shop-vite:
+      loadBalancer:
+        serversTransport: zevo-shop-vite
+        servers:
+        - url: https://vsc-shop-1:5173
+  serversTransports:
+    zevo-shop-vite:
+      serverName: vite.shop.localhost
+      insecureSkipVerify: true
+"
+            )
+        );
+    }
+
+    #[test]
     fn render_zero_routes_is_valid() {
         let dir = tempfile::tempdir().unwrap();
         let yaml = render(&project("empty", vec![]), &settings(dir.path())).unwrap();
@@ -596,6 +707,7 @@ http:
         let p = project(
             "v6",
             vec![Route {
+                backend: crate::model::Backend::default(),
                 target: Target::HostPort {
                     address: "::1".into(),
                 },

@@ -284,7 +284,12 @@ impl Shell {
         }
 
         let traefik_line = match &snapshot.settings.traefik {
-            Some(t) => format!("{} · port {}", t.entrypoint, t.http_port),
+            Some(t) => format!(
+                "{} · port {}{}",
+                t.entrypoint,
+                t.http_port,
+                if t.tls { " · HTTPS" } else { "" }
+            ),
             None => "Traefik not set up".to_string(),
         };
         let runtime_ok = snapshot.runtime.is_ok();
@@ -792,7 +797,27 @@ impl Shell {
     }
 
     fn render_traefik(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> Div {
-        let header = self.page_header("Traefik", div(), cx);
+        let adopted = snapshot
+            .settings
+            .traefik
+            .as_ref()
+            .and_then(|t| t.container.clone());
+        let header = self.page_header(
+            "Traefik",
+            h_flex().when_some(adopted, |row, container| {
+                row.child(
+                    Button::new("detect-again")
+                        .small()
+                        .icon(IconName::RefreshCw)
+                        .label("Detect again")
+                        .tooltip("Re-read this Traefik's entrypoint, HTTPS and network settings")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.run_setup(Some(container.clone()), cx)
+                        })),
+                )
+            }),
+            cx,
+        );
         let details = match &snapshot.settings.traefik {
             None => v_flex().child(Alert::warning(
                 "setup",
@@ -817,7 +842,15 @@ impl Shell {
                 ))
                 .child(field(
                     "Entrypoint",
-                    mono(format!("{} · port {}", t.entrypoint, t.http_port), cx),
+                    mono(
+                        format!(
+                            "{} · port {}{}",
+                            t.entrypoint,
+                            t.http_port,
+                            if t.tls { " · HTTPS" } else { "" }
+                        ),
+                        cx,
+                    ),
                     cx,
                 ))
                 .child(field(

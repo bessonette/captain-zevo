@@ -18,8 +18,12 @@ published ports, no port conflicts.
 - Traefik's file provider watches a directory. Zevo writes one file per
   project there, named `zevo-<slug>.yml`, and never touches files it did not
   create.
-- Project containers join a Docker network (`zevo`) under the alias `<slug>`.
-  Traefik reaches them at `http://<slug>:<port>` over that network.
+- Project containers share a Docker network with Traefik, which reaches them
+  by container name. Zevo reuses the network your Traefik already has, or
+  creates one called `zevo`. Containers already on it are left untouched.
+- If your Traefik redirects HTTP to HTTPS, Zevo detects that and writes HTTPS
+  routes. A route can also talk HTTPS to the app behind it
+  (`backend = "https"`), for dev servers with self-signed certificates.
 - Zevo finds a project's container by the labels the devcontainer tooling sets,
   so nothing in your repository changes. `zevo reconcile --watch` re-attaches
   containers after a rebuild.

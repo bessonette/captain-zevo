@@ -23,6 +23,10 @@ pub struct Candidate {
     pub entrypoint: Option<String>,
     /// Host port of that entrypoint.
     pub http_port: Option<u16>,
+    /// Whether that entrypoint serves HTTPS.
+    pub tls: bool,
+    /// Network Traefik already shares with containers, if it has one.
+    pub network: Option<String>,
     /// Reasons this Traefik cannot be adopted as is.
     pub problems: Vec<String>,
 }
@@ -54,6 +58,12 @@ fn is_traefik(c: &ContainerInfo) -> bool {
 /// Static-config values gathered from flags, environment and a mounted config file.
 #[derive(Debug, Default)]
 struct StaticConfig {
+    /// Entrypoint name to the entrypoint it redirects all traffic to.
+    redirects: Vec<(String, String)>,
+    /// Entrypoints with TLS switched on in the static config.
+    tls_entrypoints: Vec<String>,
+    /// `providers.docker.network`.
+    docker_network: Option<String>,
     file_dir: Option<String>,
     file_single: bool,
     /// (name, container port)
@@ -84,6 +94,8 @@ fn inspect(c: &ContainerInfo) -> Candidate {
             dynamic_dir: None,
             entrypoint: None,
             http_port: None,
+            tls: false,
+            network: None,
             problems,
         };
     }
@@ -112,7 +124,47 @@ fn inspect(c: &ContainerInfo) -> Candidate {
         }
     };
 
-    let entry = pick_entrypoint(&config.entrypoints);
+    // An entrypoint that redirects everything (the usual 80 -> 443 setup) is
+    // no place for routes; follow the redirect to where requests are served.
+    let mut entry = pick_entrypoint(&config.entrypoints);
+    let mut tls = false;
+    if let Some((name, _)) = entry
+        && let Some((_, to)) = config
+            .redirects
+            .iter()
+            .find(|(from, _)| from.eq_ignore_ascii_case(name))
+        && let Some(target) = config
+            .entrypoints
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(to))
+    {
+        entry = Some(target);
+        tls = true;
+    }
+    if let Some((name, port)) = entry {
+        tls = tls
+            || *port == 443
+            || config
+                .tls_entrypoints
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case(name));
+    }
+
+    // Prefer the network Traefik's Docker provider is told to use; otherwise
+    // the only user-defined network it is on.
+    let user_networks: Vec<&String> = c
+        .networks
+        .keys()
+        .filter(|n| !matches!(n.as_str(), "bridge" | "host" | "none"))
+        .collect();
+    let network = config
+        .docker_network
+        .clone()
+        .filter(|n| c.networks.contains_key(n))
+        .or_else(|| match user_networks.as_slice() {
+            [only] => Some((*only).clone()),
+            _ => None,
+        });
     let http_port = entry.and_then(|(_, port)| {
         if c.host_network {
             Some(*port)
@@ -134,6 +186,8 @@ fn inspect(c: &ContainerInfo) -> Candidate {
         dynamic_dir,
         entrypoint: entry.map(|(name, _)| name.clone()),
         http_port,
+        tls,
+        network,
         problems,
     }
 }
@@ -209,11 +263,18 @@ fn apply_option(config: &mut StaticConfig, key: &str, value: &str) {
         config.file_dir = Some(value.to_string());
     } else if key == "providers.file.filename" {
         config.file_single = true;
-    } else if let Some(rest) = key.strip_prefix("entrypoints.")
-        && let Some(name) = rest.strip_suffix(".address")
-        && let Some(port) = address_port(value)
-    {
-        set_entrypoint(config, name, port);
+    } else if key == "providers.docker.network" {
+        config.docker_network = Some(value.to_string());
+    } else if let Some(rest) = key.strip_prefix("entrypoints.") {
+        if let Some(name) = rest.strip_suffix(".address") {
+            if let Some(port) = address_port(value) {
+                set_entrypoint(config, name, port);
+            }
+        } else if let Some(name) = rest.strip_suffix(".http.redirections.entrypoint.to") {
+            config.redirects.push((name.to_string(), value.to_string()));
+        } else if let Some((name, _)) = rest.split_once(".http.tls") {
+            config.tls_entrypoints.push(name.to_string());
+        }
     }
 }
 
@@ -259,7 +320,28 @@ fn apply_yaml(config: &mut StaticConfig, text: &str) {
             ) {
                 set_entrypoint(config, name, port);
             }
+            let http = value.get("http");
+            if let (Some(name), Some(to)) = (
+                name.as_str(),
+                http.and_then(|h| h.get("redirections"))
+                    .and_then(|r| r.get("entryPoint"))
+                    .and_then(|e| e.get("to"))
+                    .and_then(|t| t.as_str()),
+            ) {
+                config.redirects.push((name.to_string(), to.to_string()));
+            }
+            if let (Some(name), Some(_)) = (name.as_str(), http.and_then(|h| h.get("tls"))) {
+                config.tls_entrypoints.push(name.to_string());
+            }
         }
+    }
+    if let Some(network) = doc
+        .get("providers")
+        .and_then(|p| p.get("docker"))
+        .and_then(|d| d.get("network"))
+        .and_then(|n| n.as_str())
+    {
+        config.docker_network = Some(network.to_string());
     }
 }
 
@@ -318,9 +400,15 @@ pub async fn adopt(
     }
 
     let mut settings = store.settings()?;
+    // Reuse the network Traefik already shares with containers, so nothing
+    // that works today has to be reconnected.
+    if let Some(network) = &candidate.network {
+        settings.network = network.clone();
+    }
     runtime.ensure_network(&settings.network).await?;
     attach_traefik(runtime, &candidate.container, &settings.network).await?;
     settings.traefik = Some(TraefikSettings {
+        tls: candidate.tls,
         mode: TraefikMode::Adopted,
         container: Some(candidate.container.clone()),
         dynamic_dir: dynamic_dir.clone(),
@@ -338,6 +426,7 @@ pub fn adopt_manual(
     dynamic_dir: &Path,
     entrypoint: &str,
     http_port: u16,
+    tls: bool,
 ) -> Result<Settings> {
     if !dynamic_dir.is_dir() {
         return Err(Error::Other(format!(
@@ -347,6 +436,7 @@ pub fn adopt_manual(
     }
     let mut settings = store.settings()?;
     settings.traefik = Some(TraefikSettings {
+        tls,
         mode: TraefikMode::Adopted,
         container: None,
         dynamic_dir: dynamic_dir.to_path_buf(),
@@ -388,6 +478,7 @@ pub async fn bootstrap(
         .await?;
 
     settings.traefik = Some(TraefikSettings {
+        tls: false,
         mode: TraefikMode::Managed,
         container: Some(MANAGED_CONTAINER.to_string()),
         dynamic_dir,
@@ -519,6 +610,53 @@ mod tests {
         let found = inspect(&c);
         assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
         assert!(found.problems[0].contains("cannot be read from here"));
+    }
+
+    #[tokio::test]
+    async fn follows_the_https_redirect_and_reuses_the_shared_network() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("dynamic")).unwrap();
+        std::fs::write(
+            tmp.path().join("traefik.yml"),
+            "entryPoints:
+  web:
+    address: ':80'
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    address: ':443'
+providers:
+  docker:
+    network: proxy
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+",
+        )
+        .unwrap();
+        let mut c = traefik(&["traefik"], tmp.path());
+        c.published_ports = [(80, 80), (443, 443)].into();
+        c.networks = [("proxy".to_string(), vec![])].into();
+        let rt = FakeRuntime::new();
+        rt.ensure_network("proxy").await.unwrap();
+        rt.add_container(c);
+
+        let found = find_traefik(&rt).await.unwrap();
+        let c = &found[0];
+        assert!(c.adoptable(), "{:?}", c.problems);
+        assert_eq!(c.entrypoint.as_deref(), Some("websecure"));
+        assert_eq!((c.http_port, c.tls), (Some(443), true));
+        assert_eq!(c.network.as_deref(), Some("proxy"));
+
+        let store = Store::open(tmp.path().join("cfg"));
+        let settings = adopt(&store, &rt, c).await.unwrap();
+        assert_eq!(settings.network, "proxy");
+        assert!(settings.traefik.unwrap().tls);
+        // No second network was created for it.
+        assert_eq!(rt.networks(), ["proxy"]);
     }
 
     #[tokio::test]

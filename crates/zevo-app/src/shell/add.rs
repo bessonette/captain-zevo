@@ -72,6 +72,7 @@ fn parse_route(subdomain: &str, port: &str) -> Result<Route, String> {
         .filter(|p| *p != 0)
         .ok_or_else(|| format!("'{}' is not a port number (1 to 65535)", port.trim()))?;
     Ok(Route {
+        backend: zevo_core::model::Backend::default(),
         subdomain: (!subdomain.is_empty()).then_some(subdomain),
         port,
         path_prefix: None,

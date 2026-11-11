@@ -26,6 +26,7 @@ pub fn draft(folder: &Path) -> Result<Project> {
         .ports
         .first()
         .map(|port| Route {
+            backend: crate::model::Backend::default(),
             subdomain: None,
             port: *port,
             path_prefix: None,
@@ -124,7 +125,7 @@ mod tests {
         let routes = tmp.path().join("routes");
         std::fs::create_dir(&routes).unwrap();
         let store = Store::open(tmp.path().join("cfg"));
-        setup::adopt_manual(&store, &routes, "web", 80).unwrap();
+        setup::adopt_manual(&store, &routes, "web", 80, false).unwrap();
         (tmp, store)
     }
 

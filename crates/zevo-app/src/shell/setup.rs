@@ -46,7 +46,7 @@ impl Shell {
     }
 
     /// Adopts the named container, or starts a managed Traefik when `None`.
-    fn run_setup(&mut self, adopt: Option<String>, cx: &mut Context<Self>) {
+    pub(super) fn run_setup(&mut self, adopt: Option<String>, cx: &mut Context<Self>) {
         self.setup.busy = true;
         self.setup.error = None;
         let backend = self.backend.clone();
@@ -66,7 +66,11 @@ impl Shell {
                         this.setup = SetupState::default();
                         this.reload_now(cx);
                     }
-                    Err(e) => this.setup.error = Some(e),
+                    Err(e) => {
+                        // Also shown as a banner, for when setup is re-run from the Traefik page.
+                        this.error = Some(e.clone());
+                        this.setup.error = Some(e);
+                    }
                 }
                 cx.notify();
             });
@@ -118,13 +122,16 @@ impl Shell {
                         )
                         .when(c.adoptable(), |card| {
                             card.child(div().text_color(cx.theme().muted_foreground).child(
-                                "Zevo adds its own route files to this folder and connects the container to the zevo network. Your existing routes stay as they are.",
+                                "Zevo adds its own route files to this folder. Your existing routes stay as they are.",
                             ))
                             .when_some(c.dynamic_dir.clone(), |card, dir| {
                                 card.child(field("Routes folder", mono(dir.display().to_string(), cx), cx))
                             })
+                            .when_some(c.network.clone(), |card, network| {
+                                card.child(field("Network", mono(network, cx), cx))
+                            })
                             .when_some(c.entrypoint.clone().zip(c.http_port), |card, (name, port)| {
-                                card.child(field("Entrypoint", mono(format!("{name} · port {port}"), cx), cx))
+                                card.child(field("Entrypoint", mono(format!("{name} · port {port}{}", if c.tls { " · HTTPS" } else { "" }), cx), cx))
                             })
                             .child(h_flex().child(
                                 Button::new(("adopt", ix))

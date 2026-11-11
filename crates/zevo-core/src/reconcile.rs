@@ -50,8 +50,13 @@ pub struct Report {
 
 /// URLs a project is served at.
 pub fn urls(project: &Project, settings: &Settings) -> Vec<String> {
-    let port = match settings.traefik.as_ref().map(|t| t.http_port) {
-        Some(80) | None => String::new(),
+    let traefik = settings.traefik.as_ref();
+    let tls = traefik.is_some_and(|t| t.tls);
+    let scheme = if tls { "https" } else { "http" };
+    let port = match traefik.map(|t| t.http_port) {
+        None => String::new(),
+        Some(443) if tls => String::new(),
+        Some(80) if !tls => String::new(),
         Some(port) => format!(":{port}"),
     };
     project
@@ -60,7 +65,7 @@ pub fn urls(project: &Project, settings: &Settings) -> Vec<String> {
         .map(|r| {
             let host = r.hostname(&project.slug, &settings.domain_suffix);
             format!(
-                "http://{host}{port}{}",
+                "{scheme}://{host}{port}{}",
                 r.path_prefix.as_deref().unwrap_or("")
             )
         })
@@ -115,23 +120,6 @@ pub async fn reconcile(store: &Store, runtime: Option<&dyn Runtime>) -> Result<R
     let projects = store.projects()?;
     let mut report = Report::default();
 
-    for project in &projects {
-        match traefik::write_project(project, &settings) {
-            Ok(true) => report.actions.push(Action::WroteRoutes {
-                slug: project.slug.clone(),
-            }),
-            Ok(false) => {}
-            Err(e) => report.warnings.push(format!("{}: {e}", project.slug)),
-        }
-    }
-    for slug in traefik::managed_slugs(&traefik_settings.dynamic_dir)? {
-        if !projects.iter().any(|p| p.slug == slug)
-            && traefik::remove_project(&slug, &traefik_settings.dynamic_dir)?
-        {
-            report.actions.push(Action::RemovedOrphanRoutes { slug });
-        }
-    }
-
     let needs_network = |p: &Project| {
         p.host == LOCAL_HOST_ID && p.routes.iter().any(|r| r.target == Target::Container)
     };
@@ -174,12 +162,11 @@ pub async fn reconcile(store: &Store, runtime: Option<&dyn Runtime>) -> Result<R
                     } else {
                         ContainerState::Stopped
                     };
-                    status.attached = c
-                        .networks
-                        .get(&settings.network)
-                        .is_some_and(|aliases| aliases.contains(&project.slug));
+                    status.attached = c.networks.contains_key(&settings.network);
                     if c.running && !status.attached && needs_network(project) {
-                        match attach(runtime, c, &settings.network, &project.slug).await {
+                        // The alias is a convenience; routes use the container name.
+                        let aliases = [project.slug.clone()];
+                        match runtime.connect(&c.id, &settings.network, &aliases).await {
                             Ok(()) => {
                                 status.attached = true;
                                 report.actions.push(Action::AttachedProject {
@@ -193,7 +180,25 @@ pub async fn reconcile(store: &Store, runtime: Option<&dyn Runtime>) -> Result<R
                 }
             }
         }
+
+        // Containers are reached by their own name, which changes on rebuild,
+        // so the file follows the container that currently exists.
+        match traefik::write_project_for(project, &settings, status.container.as_deref()) {
+            Ok(true) => report.actions.push(Action::WroteRoutes {
+                slug: project.slug.clone(),
+            }),
+            Ok(false) => {}
+            Err(e) => report.warnings.push(format!("{}: {e}", project.slug)),
+        }
         report.projects.push(status);
+    }
+
+    for slug in traefik::managed_slugs(&traefik_settings.dynamic_dir)? {
+        if !projects.iter().any(|p| p.slug == slug)
+            && traefik::remove_project(&slug, &traefik_settings.dynamic_dir)?
+        {
+            report.actions.push(Action::RemovedOrphanRoutes { slug });
+        }
     }
     Ok(report)
 }
@@ -232,14 +237,6 @@ async fn prepare_network(
     runtime.containers().await
 }
 
-async fn attach(runtime: &dyn Runtime, c: &ContainerInfo, network: &str, slug: &str) -> Result<()> {
-    // Already on the network without our alias: aliases can only be set on connect.
-    if c.networks.contains_key(network) {
-        runtime.disconnect(&c.id, network).await?;
-    }
-    runtime.connect(&c.id, network, &[slug.to_string()]).await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,6 +252,7 @@ mod tests {
             kind: DevcontainerKind::Image,
             service: None,
             routes: vec![Route {
+                backend: crate::model::Backend::default(),
                 subdomain: None,
                 port: 3000,
                 path_prefix: None,
@@ -300,12 +298,12 @@ mod tests {
         assert_eq!(
             report.actions,
             [
-                Action::WroteRoutes {
-                    slug: "shop".into()
-                },
                 Action::AttachedProject {
                     slug: "shop".into(),
                     container: "vsc-shop".into()
+                },
+                Action::WroteRoutes {
+                    slug: "shop".into()
                 },
             ]
         );
@@ -333,11 +331,20 @@ mod tests {
         let report = reconcile(&store, Some(&rt)).await.unwrap();
         assert_eq!(
             report.actions,
-            [Action::AttachedProject {
-                slug: "shop".into(),
-                container: "vsc-shop-2".into()
-            }]
+            [
+                Action::AttachedProject {
+                    slug: "shop".into(),
+                    container: "vsc-shop-2".into()
+                },
+                Action::WroteRoutes {
+                    slug: "shop".into()
+                },
+            ]
         );
+
+        let file =
+            std::fs::read_to_string(store.managed_dynamic_dir().join("zevo-shop.yml")).unwrap();
+        assert!(file.contains("http://vsc-shop-2:3000"), "{file}");
 
         store.remove_project("shop").unwrap();
         let report = reconcile(&store, Some(&rt)).await.unwrap();
@@ -351,15 +358,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fixes_a_container_on_the_network_without_the_alias() {
+    async fn leaves_a_container_already_on_the_network_alone() {
         let (_tmp, store, rt) = set_up().await;
         store.add_project(&project("shop", "/work/shop")).unwrap();
         let mut c = devcontainer("vsc-shop", "/work/shop");
-        c.networks.insert("zevo".into(), vec![]);
+        c.networks.insert("zevo".into(), vec!["app".into()]);
         rt.add_container(c);
 
-        reconcile(&store, Some(&rt)).await.unwrap();
-        assert_eq!(rt.container("vsc-shop").unwrap().networks["zevo"], ["shop"]);
+        let report = reconcile(&store, Some(&rt)).await.unwrap();
+        // No reconnect: its existing aliases survive, and it counts as attached.
+        assert_eq!(rt.container("vsc-shop").unwrap().networks["zevo"], ["app"]);
+        assert!(report.projects[0].attached);
+        assert_eq!(
+            report.actions,
+            [Action::WroteRoutes {
+                slug: "shop".into()
+            }]
+        );
     }
 
     #[tokio::test]
@@ -442,9 +457,29 @@ mod tests {
     }
 
     #[test]
+    fn urls_use_https_when_the_entrypoint_does() {
+        let settings = Settings {
+            traefik: Some(crate::model::TraefikSettings {
+                tls: true,
+                mode: crate::model::TraefikMode::Adopted,
+                container: None,
+                dynamic_dir: "/x".into(),
+                entrypoint: "websecure".into(),
+                http_port: 443,
+            }),
+            ..Settings::default()
+        };
+        assert_eq!(
+            urls(&project("shop", "/work/shop"), &settings),
+            ["https://shop.localhost"]
+        );
+    }
+
+    #[test]
     fn urls_include_a_non_default_port_and_prefix() {
         let settings = Settings {
             traefik: Some(crate::model::TraefikSettings {
+                tls: false,
                 mode: crate::model::TraefikMode::Managed,
                 container: None,
                 dynamic_dir: "/x".into(),

@@ -173,12 +173,14 @@ mod tests {
             service: Some("app".into()),
             routes: vec![
                 Route {
+                    backend: crate::model::Backend::default(),
                     subdomain: None,
                     port: 3000,
                     path_prefix: None,
                     target: Target::Container,
                 },
                 Route {
+                    backend: crate::model::Backend::default(),
                     subdomain: Some("api".into()),
                     port: 8080,
                     path_prefix: Some("/v1".into()),
@@ -199,6 +201,7 @@ mod tests {
 
         let settings = Settings {
             traefik: Some(TraefikSettings {
+                tls: false,
                 mode: TraefikMode::Managed,
                 container: Some("zevo-traefik".into()),
                 dynamic_dir: store.managed_dynamic_dir(),
