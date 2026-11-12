@@ -288,6 +288,9 @@ in-memory runtime, so the test suite needs no Docker daemon. See
 The logo is the single file [assets/logo.svg](assets/logo.svg). Replace it,
 then run `scripts/make-icons.sh` to rebuild the app icon files in
 `assets/icons` from it. The README and the desktop app read the logo directly.
+The app's sidebar watermark uses a one-colour drawing of the same shape,
+[assets/logo-mono.svg](assets/logo-mono.svg); redraw it to match if the logo
+changes.
 
 ## License
 

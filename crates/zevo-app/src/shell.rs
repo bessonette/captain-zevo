@@ -31,6 +31,8 @@ mod hosts;
 mod setup;
 
 const LOGO: &[u8] = include_bytes!("../../../assets/logo.svg");
+/// One-colour logo, tinted from the theme where it is used.
+const LOGO_MONO: &[u8] = include_bytes!("../../../assets/logo-mono.svg");
 
 /// What a menu bar item or shortcut asks the main window to do.
 #[derive(Clone, Copy)]
@@ -268,18 +270,30 @@ impl Shell {
             MenuCommand::Hosts => self.open_hosts(window, cx),
             MenuCommand::AddProject => self.open_add(window, cx),
             MenuCommand::About => {
-                window.open_dialog(cx, |dialog, _, cx| {
-                    dialog.title("Captain Zevo").child(
+                let logo = self.logo.clone();
+                window.open_dialog(cx, move |dialog, _, cx| {
+                    dialog.child(
                         v_flex()
-                            .gap_2()
-                            .child(format!("Version {}", env!("CARGO_PKG_VERSION")))
+                            .gap_3()
+                            .items_center()
+                            .pb_2()
+                            .child(img(logo.clone()).size(px(96.)))
                             .child(
-                                div().text_color(cx.theme().muted_foreground).child(
-                                    "Gives every devcontainer project a stable local address by managing Traefik routes.",
-                                ),
+                                v_flex()
+                                    .items_center()
+                                    .child(div().text_lg().font_semibold().child("Captain Zevo"))
+                                    .child(
+                                        div()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
+                                    ),
                             )
+                            .child(div().text_center().child(
+                                "Gives every devcontainer project a stable local address by managing Traefik routes.",
+                            ))
                             .child(
                                 div()
+                                    .text_sm()
                                     .text_color(cx.theme().muted_foreground)
                                     .child("Open source under the MIT and Apache-2.0 licenses."),
                             ),
@@ -650,8 +664,14 @@ impl Shell {
             };
             v_flex()
                 .p_8()
+                .pt_16()
+                .gap_4()
                 .items_center()
                 .text_color(cx.theme().muted_foreground)
+                // The logo only greets an empty registry, not an empty search.
+                .when(snapshot.projects.is_empty(), |col| {
+                    col.child(img(self.logo.clone()).size(px(112.)))
+                })
                 .child(message)
         } else {
             v_flex().children(rows.into_iter().enumerate().map(|(ix, view)| {
@@ -1497,10 +1517,18 @@ impl Render for Shell {
                 Some(e) => {
                     div().child(Alert::error("load", e.clone()).title("Could not load projects"))
                 }
-                None => h_flex()
-                    .gap_2()
-                    .child(Spinner::new())
-                    .child("Loading projects…"),
+                None => div().child(
+                    v_flex()
+                        .gap_4()
+                        .items_center()
+                        .child(img(self.logo.clone()).size(px(112.)))
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(Spinner::new())
+                                .child("Loading projects…"),
+                        ),
+                ),
             };
             return v_flex()
                 .size_full()
@@ -1558,7 +1586,27 @@ impl Render for Shell {
                     .flex_1()
                     .items_start()
                     .overflow_hidden()
-                    .child(self.render_sidebar(&snapshot, cx))
+                    .child(
+                        div()
+                            .relative()
+                            .h_full()
+                            .flex_shrink_0()
+                            .overflow_hidden()
+                            .child(self.render_sidebar(&snapshot, cx))
+                            // A large, faint, tilted logo in the empty lower
+                            // part of the sidebar, cropped by its edge. It has
+                            // no mouse handlers, so clicks pass through it.
+                            .child(
+                                svg()
+                                    .data(LOGO_MONO)
+                                    .absolute()
+                                    .left(px(-58.))
+                                    .bottom(px(34.))
+                                    .size(px(300.))
+                                    .text_color(cx.theme().foreground.opacity(0.055))
+                                    .with_transformation(Transformation::rotate(radians(-0.26))),
+                            ),
+                    )
                     .child(
                         v_flex()
                             .flex_1()

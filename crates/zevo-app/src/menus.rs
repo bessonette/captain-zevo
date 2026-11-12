@@ -36,6 +36,7 @@ pub fn install(cx: &mut App, window: AnyWindowHandle, shell: Entity<Shell>) {
         KeyBinding::new("cmd-n", AddProject, None),
         KeyBinding::new("ctrl-n", AddProject, None),
         KeyBinding::new("cmd-,", ShowSettings, None),
+        KeyBinding::new("f1", About, None),
         KeyBinding::new("cmd-1", ShowProjects, None),
         KeyBinding::new("cmd-2", ShowTraefik, None),
         KeyBinding::new("cmd-3", ShowHosts, None),

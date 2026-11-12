@@ -182,6 +182,7 @@ impl Shell {
                 .p_4()
                 .gap_4()
                 .max_w(px(760.))
+                .child(img(self.logo.clone()).size(px(88.)))
                 .child(intro)
                 .when_some(self.setup.error.clone(), |col, e| {
                     col.child(Alert::error("setup-error", e).title("Setup did not finish"))
