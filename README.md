@@ -138,6 +138,13 @@ zevo add --host buildbox /srv/dev/billing
 - Zevo finds the Docker socket on the remote wherever its runtime puts it
   (Docker Engine, Docker Desktop, OrbStack, Colima, Rancher Desktop, rootless
   Docker, Podman). Pass `--docker-socket <path>` if yours is somewhere else.
+- If Docker there is run through a wrapper instead of a socket your user can
+  open (a script, or `sudo -n docker` on systems that keep Docker behind
+  sudo), give the command: `zevo host add user@box --docker-command
+  "~/tools/docker.sh"`. Zevo runs `<command> system dial-stdio` over SSH,
+  which carries the Docker API through the command, so the wrapper only has
+  to pass its arguments on to `docker`. With sudo, it must not ask for a
+  password.
 - A host's address can be a name, such as a Tailscale name or `box.local`.
   Zevo looks up its current IP on every reconcile, so routes follow the
   machine when its IP changes.

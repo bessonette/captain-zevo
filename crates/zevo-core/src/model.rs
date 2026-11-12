@@ -230,6 +230,11 @@ pub struct Host {
     /// Docker socket on the host, if not `/var/run/docker.sock`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docker_socket: Option<String>,
+    /// Command that runs Docker on the host, for setups where it is reached
+    /// through a wrapper (a script, `sudo -n docker`) and not a socket this
+    /// user can open. Takes precedence over `docker_socket`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker_command: Option<String>,
     /// Port of the host's edge Traefik.
     #[serde(default = "default_edge_port")]
     pub edge_port: u16,
@@ -277,6 +282,7 @@ impl Host {
                 .unwrap_or(machine)
                 .to_string(),
             docker_socket: None,
+            docker_command: None,
             edge_port: DEFAULT_EDGE_PORT,
         })
     }

@@ -119,6 +119,7 @@ pub trait Backend: Send + Sync + 'static {
         name: &str,
         address: &str,
         docker_socket: &str,
+        docker_command: &str,
     ) -> Result<(), String>;
     /// Unregisters a host and removes its edge Traefik. `Ok(Some(note))`
     /// when the host was removed but something was left behind there.
@@ -377,6 +378,7 @@ impl Backend for SystemBackend {
         name: &str,
         address: &str,
         docker_socket: &str,
+        docker_command: &str,
     ) -> Result<(), String> {
         self.tokio
             .block_on(remote::register_host(
@@ -385,6 +387,7 @@ impl Backend for SystemBackend {
                 Some(name),
                 Some(address),
                 Some(docker_socket),
+                Some(docker_command),
             ))
             .map(|_| ())
             .map_err(|e| e.to_string())
@@ -812,6 +815,7 @@ impl Backend for DemoBackend {
         name: &str,
         address: &str,
         _docker_socket: &str,
+        _docker_command: &str,
     ) -> Result<(), String> {
         let host = Host::from_ssh(ssh, Some(name), Some(address)).map_err(|e| e.to_string())?;
         let mut hosts = self.hosts.lock().unwrap();

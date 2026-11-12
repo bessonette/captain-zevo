@@ -169,8 +169,12 @@ enum HostCommand {
         #[arg(long)]
         address: Option<String>,
         /// Path of the Docker socket there, if Zevo cannot find it.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "docker_command")]
         docker_socket: Option<String>,
+        /// Command that runs Docker there, when it is reached through a
+        /// wrapper and not a socket: a script, or "sudo -n docker".
+        #[arg(long)]
+        docker_command: Option<String>,
     },
     /// List hosts and whether Docker answers on each.
     Ls,
@@ -398,6 +402,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 name,
                 address,
                 docker_socket,
+                docker_command,
             } => {
                 let (host, version) = remote::register_host(
                     &store,
@@ -405,16 +410,18 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     name.as_deref(),
                     address.as_deref(),
                     docker_socket.as_deref(),
+                    docker_command.as_deref(),
                 )
                 .await?;
                 println!(
                     "Added host '{}' ({version}), routed at {}.",
                     host.id, host.address
                 );
-                println!(
-                    "Docker socket there: {}",
-                    host.docker_socket.as_deref().unwrap_or("default")
-                );
+                match (&host.docker_command, &host.docker_socket) {
+                    (Some(command), _) => println!("Docker there is reached with: {command}"),
+                    (None, Some(socket)) => println!("Docker socket there: {socket}"),
+                    (None, None) => {}
+                }
                 println!(
                     "Add its projects with: zevo add --host {} <folder on that machine>",
                     host.id

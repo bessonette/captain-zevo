@@ -17,6 +17,7 @@ pub(super) struct HostForm {
     name: Entity<InputState>,
     address: Entity<InputState>,
     docker_socket: Entity<InputState>,
+    docker_command: Entity<InputState>,
     error: Option<String>,
     busy: bool,
 }
@@ -32,6 +33,7 @@ impl Shell {
                 name: input("optional", window, cx),
                 address: input("optional", window, cx),
                 docker_socket: input("found automatically", window, cx),
+                docker_command: input("e.g. ~/tools/docker.sh", window, cx),
                 error: None,
                 busy: false,
             });
@@ -47,15 +49,16 @@ impl Shell {
         let name = form.name.read(cx).value().to_string();
         let address = form.address.read(cx).value().to_string();
         let docker_socket = form.docker_socket.read(cx).value().to_string();
+        let docker_command = form.docker_command.read(cx).value().to_string();
         form.busy = true;
         form.error = None;
         let backend = self.backend.clone();
         cx.spawn_in(window, async move |this, cx| {
             // Connecting over SSH can take several seconds.
             let result = cx
-                .background_spawn(
-                    async move { backend.add_host(&ssh, &name, &address, &docker_socket) },
-                )
+                .background_spawn(async move {
+                    backend.add_host(&ssh, &name, &address, &docker_socket, &docker_command)
+                })
                 .await;
             _ = this.update_in(cx, |this, window, cx| {
                 let Some(form) = &mut this.host_form else {
@@ -64,7 +67,13 @@ impl Shell {
                 form.busy = false;
                 match result {
                     Ok(()) => {
-                        for input in [&form.ssh, &form.name, &form.address, &form.docker_socket] {
+                        for input in [
+                            &form.ssh,
+                            &form.name,
+                            &form.address,
+                            &form.docker_socket,
+                            &form.docker_command,
+                        ] {
                             input.update(cx, |i, cx| i.set_value("", window, cx));
                         }
                         window.push_notification("Host added", cx);
@@ -224,16 +233,30 @@ impl Shell {
                         .items_end()
                         .child(labelled("SSH destination", &form.ssh, 230.))
                         .child(labelled("Name", &form.name, 150.))
-                        .child(labelled("Address for routing", &form.address, 170.))
-                        .child(labelled("Docker socket", &form.docker_socket, 190.))
+                        .child(labelled("Address for routing", &form.address, 170.)),
+                )
+                .child(
+                    v_flex()
+                        .gap_1p5()
+                        .child(div().max_w(px(640.)).text_sm().text_color(cx.theme().muted_foreground).child(
+                            "Zevo looks for Docker's socket there. Fill in one of these only if it cannot be \
+                             found, or if Docker is run through a wrapper (a script, or \"sudo -n docker\").",
+                        ))
                         .child(
-                            Button::new("add-host")
-                                .primary()
-                                .label("Add host")
-                                .loading(form.busy)
-                                .on_click(cx.listener(|this, _, window, cx| this.submit_host(window, cx))),
+                            h_flex()
+                                .gap_3()
+                                .items_end()
+                                .child(labelled("Docker socket", &form.docker_socket, 230.))
+                                .child(labelled("or Docker command", &form.docker_command, 230.)),
                         ),
                 )
+                .child(h_flex().child(
+                    Button::new("add-host")
+                        .primary()
+                        .label("Add host")
+                        .loading(form.busy)
+                        .on_click(cx.listener(|this, _, window, cx| this.submit_host(window, cx))),
+                ))
                 .when_some(form.error.clone(), |col, e| {
                     col.child(Alert::error("host-error", e).title("Could not add the host"))
                 })
