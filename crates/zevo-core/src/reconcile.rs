@@ -206,6 +206,11 @@ pub type RemoteRuntimes<'a> =
 
 /// Name of the edge Traefik container and its routes volume on remote hosts.
 pub const EDGE_CONTAINER: &str = "zevo-edge";
+/// Network the edge shares with project containers on a remote host. Always
+/// Zevo's own: `settings.network` may be the name of a network this machine's
+/// Traefik already had, and a network of that name on another machine belongs
+/// to something else.
+pub const EDGE_NETWORK: &str = crate::model::DEFAULT_NETWORK;
 pub const EDGE_VOLUME: &str = "zevo-edge-routes";
 
 /// What is known about one remote host during a pass.
@@ -281,11 +286,11 @@ pub async fn reconcile_hosts(
         let mut edge_ready = false;
         if needs_edge {
             let prepared = async {
-                rt.ensure_network(&settings.network).await?;
+                rt.ensure_network(EDGE_NETWORK).await?;
                 rt.ensure_edge(&crate::runtime::EdgeSpec {
                     container: EDGE_CONTAINER.to_string(),
                     image: setup::MANAGED_IMAGE.to_string(),
-                    network: settings.network.clone(),
+                    network: EDGE_NETWORK.to_string(),
                     volume: EDGE_VOLUME.to_string(),
                     port: host.edge_port,
                 })
@@ -355,7 +360,7 @@ pub async fn reconcile_hosts(
                 ctx.runtime,
                 project,
                 &ctx.containers,
-                &settings.network,
+                EDGE_NETWORK,
                 &mut status,
                 &mut report,
             )

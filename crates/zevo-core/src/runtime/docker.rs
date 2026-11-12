@@ -119,9 +119,10 @@ fn connect_error(network: &str, message: &str) -> Error {
     if message.contains("conflicts with existing route") {
         return Error::Runtime(format!(
             "the container already uses the address range of the '{network}' network inside \
-             itself (usually because it runs its own Docker). On that machine, remove \
-             Zevo's Traefik container and the network (`docker network rm {network}`); \
-             Zevo recreates both on a different range. Docker said: {message}"
+             itself (usually because it runs its own Docker), so it cannot join it. The \
+             network has to be recreated on another range: if Zevo created it, remove it \
+             on that machine and Zevo will make a new one; if it is your own, recreate it \
+             with a different --subnet. Docker said: {message}"
         ));
     }
     Error::Runtime(message.to_string())
@@ -353,6 +354,15 @@ impl Runtime for DockerRuntime {
                         "a container named '{}' already exists there and was not created by Zevo",
                         spec.container
                     )));
+                }
+                // An edge made by an earlier version may sit on another
+                // network; it has to share this one with the projects.
+                let attached = existing
+                    .network_settings
+                    .and_then(|n| n.networks)
+                    .is_some_and(|networks| networks.contains_key(&spec.network));
+                if !attached {
+                    self.connect(&spec.container, &spec.network, &[]).await?;
                 }
                 if existing.state.and_then(|s| s.running).unwrap_or(false) {
                     return Ok(false);
@@ -617,7 +627,7 @@ mod tests {
         let Error::Runtime(text) = connect_error("zevo", clash) else {
             panic!("expected a runtime error");
         };
-        assert!(text.contains("docker network rm zevo"), "{text}");
+        assert!(text.contains("'zevo' network"), "{text}");
         assert!(text.contains(clash), "{text}");
         let Error::Runtime(other) = connect_error("zevo", "no such container") else {
             panic!("expected a runtime error");

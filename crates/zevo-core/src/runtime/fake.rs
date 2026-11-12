@@ -175,6 +175,7 @@ impl Runtime for FakeRuntime {
     async fn ensure_edge(&self, spec: &super::EdgeSpec) -> Result<bool> {
         self.with(|s| {
             if let Some(existing) = s.containers.iter_mut().find(|c| c.name == spec.container) {
+                existing.networks.entry(spec.network.clone()).or_default();
                 let was_running = std::mem::replace(&mut existing.running, true);
                 return Ok(!was_running);
             }
