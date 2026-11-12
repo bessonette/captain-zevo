@@ -2,6 +2,7 @@
 
 mod backend;
 mod shell;
+mod theme;
 
 use std::sync::Arc;
 
@@ -34,7 +35,7 @@ fn main() {
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
-            Theme::update(cx, |theme| theme.font_size = px(14.));
+            theme::apply(cx);
             cx.bind_keys([
                 KeyBinding::new("cmd-q", Quit, None),
                 KeyBinding::new("ctrl-q", Quit, None),
@@ -69,12 +70,12 @@ fn main() {
                         window
                             .observe_window_appearance(|window, cx| {
                                 Theme::sync_system_appearance(Some(window), cx);
-                                Theme::update(cx, |theme| theme.font_size = px(14.));
+                                theme::apply(cx);
                             })
                             .detach();
                     }
                 }
-                Theme::update(cx, |theme| theme.font_size = px(14.));
+                theme::apply(cx);
                 cx.new(|cx| shell::Shell::new(backend, demo, window, cx))
             })
             .expect("failed to open the main window");
