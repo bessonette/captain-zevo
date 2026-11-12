@@ -22,6 +22,7 @@ use zevo_core::remote;
 use zevo_core::runtime::{DockerRuntime, Runtime};
 use zevo_core::setup::{self, Candidate};
 use zevo_core::store::Store;
+use zevo_core::templates;
 use zevo_core::traefik::{self, RouterInfo};
 
 /// One project with everything the UI shows about it.
@@ -100,6 +101,16 @@ pub trait Backend: Send + Sync + 'static {
     /// Inspects a folder on the given host (`local` for this machine) and
     /// proposes a project for it, without saving.
     fn draft(&self, host: &str, folder: &str) -> Result<Project, String>;
+    /// Creates a new project folder from a starter template inside `parent`,
+    /// with the chosen extras (ids from `templates::EXTRAS`), and returns the
+    /// folder's path.
+    fn create_project(
+        &self,
+        parent: &str,
+        name: &str,
+        template: &str,
+        extras: &[&'static str],
+    ) -> Result<String, String>;
     /// Registers a remote host after checking that Docker answers on it.
     fn add_host(&self, ssh: &str, name: &str, address: &str) -> Result<(), String>;
     /// Unregisters a host and removes its edge Traefik. `Ok(Some(note))`
@@ -337,6 +348,20 @@ impl Backend for SystemBackend {
         }
         let host = self.store.host(host).map_err(|e| e.to_string())?;
         register::draft_remote(&host, folder).map_err(|e| e.to_string())
+    }
+
+    fn create_project(
+        &self,
+        parent: &str,
+        name: &str,
+        template: &str,
+        extras: &[&'static str],
+    ) -> Result<String, String> {
+        let parent = register::expand_home(Path::new(parent.trim()));
+        let options = templates::Options::from_ids(extras).map_err(|e| e.to_string())?;
+        templates::create(&parent, name, template, &options)
+            .map(|folder| folder.to_string_lossy().into_owned())
+            .map_err(|e| e.to_string())
     }
 
     fn add_host(&self, ssh: &str, name: &str, address: &str) -> Result<(), String> {
@@ -751,6 +776,20 @@ impl Backend for DemoBackend {
             .unwrap()
             .retain(|(p, _, _)| p.slug != slug);
         Ok(())
+    }
+
+    fn create_project(
+        &self,
+        parent: &str,
+        name: &str,
+        _template: &str,
+        _extras: &[&'static str],
+    ) -> Result<String, String> {
+        let slug = zevo_core::model::slugify(name);
+        if slug.is_empty() {
+            return Err("give the project a name with letters or digits in it".into());
+        }
+        Ok(format!("{}/{slug}", parent.trim().trim_end_matches('/')))
     }
 
     fn add_host(&self, ssh: &str, name: &str, address: &str) -> Result<(), String> {

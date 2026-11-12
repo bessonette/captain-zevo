@@ -17,6 +17,7 @@ pub mod remote;
 pub mod runtime;
 pub mod setup;
 pub mod store;
+pub mod templates;
 pub mod traefik;
 
 pub use error::{Error, Result};

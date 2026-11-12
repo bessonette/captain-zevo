@@ -14,3 +14,21 @@ zevo-core = { version = "0.1.0", path = "../zevo-core" }
 
 [lints]
 workspace = true
+
+# Installers: build the app (`cargo build --release -p zevo-app`), then run
+# `cargo packager --release` from this folder
+# (https://github.com/crabnebula-dev/cargo-packager).
+[package.metadata.packager]
+product-name = "Captain Zevo"
+identifier = "dev.captain-zevo.app"
+category = "DeveloperTool"
+description = "Give every devcontainer project a stable local address."
+out-dir = "../../dist"
+icons = [
+    "../../assets/icons/icon-32.png",
+    "../../assets/icons/icon-128.png",
+    "../../assets/icons/icon-256.png",
+    "../../assets/icons/icon-512.png",
+    "../../assets/icons/icon.icns",
+    "../../assets/icons/icon.ico",
+]

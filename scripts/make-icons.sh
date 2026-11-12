@@ -54,6 +54,9 @@ done
 png2icns assets/icons/icon.icns assets/icons/icon-16.png assets/icons/icon-32.png \
     assets/icons/icon-128.png assets/icons/icon-256.png assets/icons/icon-512.png \
     assets/icons/icon-1024.png >/dev/null
+# Windows icon: several sizes in one file.
+"$CONVERT" assets/icons/icon-16.png assets/icons/icon-32.png assets/icons/icon-256.png \
+    assets/icons/icon.ico
 # Only replace the SVG once every raster file was produced.
 mv assets/icon.svg.tmp assets/icon.svg
 echo "Wrote assets/icon.svg and assets/icons/"

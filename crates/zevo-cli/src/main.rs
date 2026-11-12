@@ -12,7 +12,7 @@ use zevo_core::model::{Host, LOCAL_HOST_ID, Route, Target};
 use zevo_core::reconcile::{self, Action, ContainerState, Report};
 use zevo_core::runtime::{DockerRuntime, Runtime};
 use zevo_core::store::Store;
-use zevo_core::{doctor, lifecycle, register, remote, setup, traefik};
+use zevo_core::{doctor, lifecycle, register, remote, setup, templates, traefik};
 
 #[derive(Parser)]
 #[command(
@@ -34,6 +34,23 @@ enum Command {
     Setup(SetupArgs),
     /// Register an existing project folder.
     Add(AddArgs),
+    /// Create a new project folder from a starter template and register it.
+    New {
+        /// Project name; the folder is named after it.
+        name: String,
+        /// node, python, rust, go, php or ubuntu.
+        #[arg(long, default_value = "node")]
+        template: String,
+        /// Folder to create the project in (default: the current folder).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Add an extra: claude-code, codex, docker, github-cli. Repeatable.
+        #[arg(long = "with", value_name = "EXTRA")]
+        with: Vec<String>,
+        /// Leave out an extra that is on by default: shell-history, address-file.
+        #[arg(long = "without", value_name = "EXTRA")]
+        without: Vec<String>,
+    },
     /// Unregister a project and remove its routes.
     Rm { slug: String },
     /// List projects with their status and URLs.
@@ -272,6 +289,45 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Command::Setup(args) => cmd_setup(&store, args).await?,
         Command::Add(args) => cmd_add(&store, args, cli.json).await?,
+        Command::New {
+            name,
+            template,
+            dir,
+            with,
+            without,
+        } => {
+            if store.settings()?.traefik.is_none() {
+                bail!(zevo_core::Error::NotSetUp);
+            }
+            let parent = match dir {
+                Some(dir) => dir,
+                None => std::env::current_dir().context("cannot tell the current folder")?,
+            };
+            // Validate both lists, then: defaults, plus --with, minus --without.
+            templates::Options::from_ids(&without)?;
+            let mut chosen: Vec<String> = templates::EXTRAS
+                .iter()
+                .filter(|e| e.default)
+                .map(|e| e.id.to_string())
+                .chain(with)
+                .collect();
+            chosen.retain(|id| !without.contains(id));
+            let options = templates::Options::from_ids(&chosen)?;
+            let folder = templates::create(&parent, &name, &template, &options)?;
+            let project = register::draft(&folder)?;
+            register::add(&store, &project)?;
+            let report = reconcile_once(&store).await?;
+            println!(
+                "Created {} and registered it as '{}'.",
+                folder.display(),
+                project.slug
+            );
+            for url in reconcile::urls(&project, &store.settings()?) {
+                println!("  {url}");
+            }
+            println!("Build and start it with: zevo up {}", project.slug);
+            print_warnings(&report);
+        }
         Command::Rm { slug } => {
             register::remove(&store, &slug)?;
             println!("Removed {slug}.");

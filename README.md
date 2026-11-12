@@ -72,6 +72,7 @@ More commands:
 | `zevo add <folder> --address 10.0.0.5 -r 3000` | Route to a fixed host and port |
 | `zevo route add <slug> [sub:]port` / `zevo route rm <slug> [sub]` | Edit routes |
 | `zevo show <slug>` | Show a project and its generated Traefik config |
+| `zevo new "My app" --template node --with claude-code` | Create a project folder from a starter and register it |
 | `zevo rm <slug>` | Unregister and remove its routes |
 | `zevo up <slug> [--rebuild]` / `zevo down <slug>` | Start (building if needed), rebuild, or stop a project's container |
 | `zevo logs <slug> [-n 200]` | Print the end of the container's output |
@@ -145,6 +146,28 @@ zevo add --host buildbox /srv/dev/billing
   your network. Use this on networks you trust.
 - Remote hosts are not supported when Zevo itself runs on Windows yet.
 
+### Starting a new project
+
+`zevo new` (or "Start a new project" in the app) creates a folder with a
+`devcontainer.json` for a stack: `node`, `python`, `rust`, `go`, `php` or
+`ubuntu`. The file already declares the project's route, so it gets an address
+as soon as it is built (`zevo up <slug>`).
+
+Extras, added with `--with` or ticked in the app:
+
+| Extra | What it adds |
+|---|---|
+| `claude-code` | Claude Code, with its login and history kept across rebuilds |
+| `codex` | OpenAI's Codex CLI, with its login and history kept across rebuilds |
+| `docker` | This machine's Docker available inside the container |
+| `github-cli` | `gh` |
+| `shell-history` (on by default) | Command history kept across rebuilds |
+| `address-file` (on by default) | The env file with the project's own hostnames |
+
+State that must survive a rebuild lives in `.devcontainer/home/` inside the
+project, linked into the home folder by a small script on every start. It
+holds credentials, so the new project's `.gitignore` excludes it.
+
 ### Adopting an existing Traefik
 
 `zevo setup` inspects running Traefik containers. To be adopted, a Traefik
@@ -210,7 +233,8 @@ Hand edits take effect on the next `zevo reconcile`.
 4. **Remote hosts** — built: hosts over SSH, discovery, and an edge Traefik per
    host. Not yet: re-reading a remote project's declaration after it is added,
    and its env file.
-5. **Polish** — installers, system tray, local HTTPS.
+5. **Polish** — done: local HTTPS, the app's own theme, installer settings and
+   a release workflow (unsigned). Still to come: code signing, system tray.
 
 ## Desktop app (preview)
 

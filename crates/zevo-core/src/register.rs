@@ -163,7 +163,7 @@ pub fn ensure_routes_editable(project: &Project) -> Result<()> {
 }
 
 /// Replaces a leading `~` with the user's home folder, as a shell would.
-fn expand_home(path: &Path) -> std::path::PathBuf {
+pub fn expand_home(path: &Path) -> std::path::PathBuf {
     let home = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
     match (path.strip_prefix("~"), home) {
         (Ok(rest), Some(home)) => home.join(rest),

@@ -2,6 +2,7 @@
 
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement;
@@ -30,6 +31,13 @@ pub(super) struct AddForm {
     rows: Vec<RouteRow>,
     error: Option<String>,
     busy: bool,
+    /// "Start a new project": its name, where to create it, and the starter.
+    new_name: Entity<InputState>,
+    new_parent: Entity<InputState>,
+    new_template: &'static str,
+    /// Ids of the extras that are ticked.
+    new_extras: Vec<&'static str>,
+    creating: bool,
     _folder_enter: Subscription,
 }
 
@@ -102,6 +110,22 @@ impl Shell {
     }
 
     pub(super) fn open_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // New projects default to sitting beside an existing local one.
+        let default_parent = self
+            .snapshot
+            .as_ref()
+            .and_then(|s| {
+                s.projects
+                    .iter()
+                    .find(|p| p.project.host == zevo_core::model::LOCAL_HOST_ID)
+                    .and_then(|p| {
+                        p.project
+                            .path
+                            .parent()
+                            .map(|d| d.to_string_lossy().into_owned())
+                    })
+            })
+            .unwrap_or_else(|| "~".to_string());
         let folder = text_input("/path/to/project", "", window, cx);
         // Enter in the folder box continues, like the button.
         let _folder_enter = cx.subscribe_in(
@@ -122,6 +146,15 @@ impl Shell {
             rows: Vec::new(),
             error: None,
             busy: false,
+            new_name: text_input("My app", "", window, cx),
+            new_parent: text_input("/path/to/projects", &default_parent, window, cx),
+            new_template: zevo_core::templates::TEMPLATES[0].id,
+            new_extras: zevo_core::templates::EXTRAS
+                .iter()
+                .filter(|e| e.default)
+                .map(|e| e.id)
+                .collect(),
+            creating: false,
             _folder_enter,
         });
         self.go(Page::Add, cx);
@@ -180,6 +213,40 @@ impl Shell {
                             .map(|r| route_row(Some(r), window, cx))
                             .collect();
                         form.draft = Some(draft);
+                    }
+                    Err(e) => form.error = Some(e),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Creates the new project's folder, then reads it like any other.
+    fn create_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(form) = &mut self.add else { return };
+        let name = form.new_name.read(cx).value().to_string();
+        let parent = form.new_parent.read(cx).value().to_string();
+        let template = form.new_template;
+        let extras = form.new_extras.clone();
+        form.creating = true;
+        form.error = None;
+        let backend = self.backend.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    backend.create_project(&parent, &name, template, &extras)
+                })
+                .await;
+            _ = this.update_in(cx, |this, window, cx| {
+                let Some(form) = &mut this.add else { return };
+                form.creating = false;
+                match result {
+                    Ok(folder) => {
+                        form.folder
+                            .update(cx, |input, cx| input.set_value(folder, window, cx));
+                        this.inspect(window, cx);
                     }
                     Err(e) => form.error = Some(e),
                 }
@@ -297,6 +364,87 @@ impl Shell {
                     .text_color(cx.theme().muted_foreground)
                     .child(if form.host == zevo_core::model::LOCAL_HOST_ID { "The project folder on this machine. Zevo reads its devcontainer settings and changes nothing in it." } else { "The full path of the project folder on that machine. Zevo reads its devcontainer settings over SSH." }),
             );
+
+        let starting_fresh = form.draft.is_none() && form.host == zevo_core::model::LOCAL_HOST_ID;
+        let new_project = starting_fresh.then(|| {
+            v_flex()
+                .gap_3()
+                .pt_4()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .child(caption("Or start a new project", cx))
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .items_end()
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .w(px(220.))
+                                .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Name"))
+                                .child(Input::new(&form.new_name)),
+                        )
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .flex_1()
+                                .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Create it in"))
+                                .child(Input::new(&form.new_parent)),
+                        ),
+                )
+                .child(h_flex().gap_2().flex_wrap().children(
+                    zevo_core::templates::TEMPLATES.iter().enumerate().map(|(ix, template)| {
+                        let id = template.id;
+                        Button::new(("template", ix))
+                            .small()
+                            .label(template.name)
+                            .tooltip(template.description)
+                            .when(form.new_template == id, |b| b.primary())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(form) = &mut this.add {
+                                    form.new_template = id;
+                                }
+                                cx.notify();
+                            }))
+                    }),
+                ))
+                .child(
+                    v_flex()
+                        .gap_1p5()
+                        .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Include"))
+                        .child(h_flex().gap_x_4().gap_y_1p5().flex_wrap().children(
+                            zevo_core::templates::EXTRAS.iter().enumerate().map(|(ix, extra)| {
+                                let id = extra.id;
+                                Checkbox::new(("extra", ix))
+                                    .label(extra.name)
+                                    .tooltip(extra.description)
+                                    .checked(form.new_extras.contains(&id))
+                                    .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                                        if let Some(form) = &mut this.add {
+                                            form.new_extras.retain(|e| *e != id);
+                                            if *checked {
+                                                form.new_extras.push(id);
+                                            }
+                                        }
+                                        cx.notify();
+                                    }))
+                            }),
+                        )),
+                )
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .child(
+                            Button::new("create-new")
+                                .label("Create project")
+                                .loading(form.creating)
+                                .on_click(cx.listener(|this, _, window, cx| this.create_new(window, cx))),
+                        )
+                        .child(div().flex_1().text_sm().text_color(cx.theme().muted_foreground).child(
+                            "Creates a folder with a devcontainer.json for that stack. You review it before it is added.",
+                        )),
+                )
+        });
 
         let details = form.draft.as_ref().map(|draft| {
             let rows = form.rows.iter().enumerate().map(|(ix, row)| {
@@ -426,6 +574,7 @@ impl Shell {
                         .when_some(form.error.clone(), |col, e| {
                             col.child(Alert::error("add-error", e))
                         })
+                        .children(new_project)
                         .children(details),
                 ),
             ),
