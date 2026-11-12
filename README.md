@@ -8,10 +8,11 @@ you. Register a project folder once; Zevo writes its Traefik config, attaches
 its container to a shared network, and keeps both in place across rebuilds. No
 published ports, no port conflicts.
 
-> **Status: early development.** The core library and the `zevo` command-line
-> tool work for projects on the local machine. The desktop app (built with
-> [GPUI](https://gpui.rs)), remote hosts, and editor launching are planned; see
-> the roadmap below.
+> **Status: early development.** The `zevo` command-line tool and the desktop
+> app (built with [GPUI](https://gpui.rs)) work for projects on the local
+> machine. Remote hosts over SSH are built but have had little real-world
+> testing yet. There are no signed installers; build from source. See the
+> roadmap below.
 
 ## How it works
 
@@ -27,8 +28,9 @@ published ports, no port conflicts.
   directory, and lists it in the project's route file. Without mkcert, routes
   are still written and Zevo tells you what to install.
 - If your Traefik redirects HTTP to HTTPS, Zevo detects that and writes HTTPS
-  routes. A Traefik that Zevo starts itself listens on 443 and redirects 80. A route can also talk HTTPS to the app behind it
-  (`backend = "https"`), for dev servers with self-signed certificates.
+  routes. A Traefik that Zevo starts itself listens on 443 and redirects 80.
+  A route can also talk HTTPS to the app behind it (`backend = "https"`), for
+  dev servers with self-signed certificates.
 - Zevo finds a project's container by the labels the devcontainer tooling sets,
   so nothing in your repository changes. `zevo reconcile --watch` re-attaches
   containers after a rebuild.
@@ -240,12 +242,12 @@ Hand edits take effect on the next `zevo reconcile`.
 2. **Desktop app** — done for local projects: first-run setup, adding projects,
    editing routes, and the project, Traefik and settings screens.
 3. **Lifecycle and editors** — done: discovery, open in VS Code (and forks) or
-   Zed, start/stop/rebuild and logs. Building needs the `devcontainer`
-   command-line tool (`npm install -g @devcontainers/cli`). Still to come: new
-   projects from templates, JetBrains.
-4. **Remote hosts** — built: hosts over SSH, discovery, and an edge Traefik per
-   host. Not yet: re-reading a remote project's declaration after it is added,
-   and its env file.
+   Zed, start/stop/rebuild, logs, and new projects from starter templates.
+   Building needs the `devcontainer` command-line tool
+   (`npm install -g @devcontainers/cli`). Still to come: JetBrains.
+4. **Remote hosts** — built, lightly tested: hosts over SSH, discovery, and an
+   edge Traefik per host. Not yet: re-reading a remote project's declaration
+   after it is added, and its env file.
 5. **Polish** — done: local HTTPS, the app's own theme, installer settings and
    a release workflow (unsigned). Still to come: code signing, system tray.
 
