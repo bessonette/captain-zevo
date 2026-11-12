@@ -1,6 +1,7 @@
 //! Captain Zevo desktop app.
 
 mod backend;
+mod menus;
 mod shell;
 mod theme;
 
@@ -36,13 +37,6 @@ fn main() {
         .run(move |cx| {
             gpui_kit::init(cx);
             theme::apply(cx);
-            cx.bind_keys([
-                KeyBinding::new("cmd-q", Quit, None),
-                KeyBinding::new("ctrl-q", Quit, None),
-                KeyBinding::new("cmd-r", Refresh, None),
-                KeyBinding::new("ctrl-r", Refresh, None),
-            ]);
-            cx.on_action(|_: &Quit, cx| cx.quit());
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();
@@ -59,7 +53,7 @@ fn main() {
                 window_min_size: Some(size(px(820.), px(520.))),
                 ..TitleBar::window_options()
             };
-            gpui_kit::open_window(options, cx, |window, cx| {
+            let (window, shell) = gpui_kit::open_window(options, cx, |window, cx| {
                 window.set_window_title("Captain Zevo");
                 // ZEVO_THEME=light|dark overrides the system appearance.
                 match std::env::var("ZEVO_THEME").as_deref() {
@@ -79,5 +73,6 @@ fn main() {
                 cx.new(|cx| shell::Shell::new(backend, demo, window, cx))
             })
             .expect("failed to open the main window");
+            menus::install(cx, window, shell);
         });
 }

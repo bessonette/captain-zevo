@@ -32,6 +32,18 @@ mod setup;
 
 const LOGO: &[u8] = include_bytes!("../../../assets/logo.svg");
 
+/// What a menu bar item or shortcut asks the main window to do.
+#[derive(Clone, Copy)]
+pub enum MenuCommand {
+    About,
+    Settings,
+    AddProject,
+    Refresh,
+    Projects,
+    Traefik,
+    Hosts,
+}
+
 /// Index of the Logs tab on a project page.
 const LOGS_TAB: usize = 2;
 /// Lines of container output fetched for the Logs tab.
@@ -240,6 +252,41 @@ impl Shell {
             });
         })
         .detach();
+    }
+
+    pub fn menu_command(
+        &mut self,
+        command: MenuCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            MenuCommand::Refresh => self.reload(cx),
+            MenuCommand::Projects => self.go(Page::Projects(None), cx),
+            MenuCommand::Traefik => self.go(Page::Traefik, cx),
+            MenuCommand::Settings => self.go(Page::Settings, cx),
+            MenuCommand::Hosts => self.open_hosts(window, cx),
+            MenuCommand::AddProject => self.open_add(window, cx),
+            MenuCommand::About => {
+                window.open_dialog(cx, |dialog, _, cx| {
+                    dialog.title("Captain Zevo").child(
+                        v_flex()
+                            .gap_2()
+                            .child(format!("Version {}", env!("CARGO_PKG_VERSION")))
+                            .child(
+                                div().text_color(cx.theme().muted_foreground).child(
+                                    "Gives every devcontainer project a stable local address by managing Traefik routes.",
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Open source under the MIT and Apache-2.0 licenses."),
+                            ),
+                    )
+                });
+            }
+        }
     }
 
     fn go(&mut self, page: Page, cx: &mut Context<Self>) {
