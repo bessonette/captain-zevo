@@ -16,6 +16,7 @@ pub(super) struct HostForm {
     ssh: Entity<InputState>,
     name: Entity<InputState>,
     address: Entity<InputState>,
+    docker_socket: Entity<InputState>,
     error: Option<String>,
     busy: bool,
 }
@@ -30,6 +31,7 @@ impl Shell {
                 ssh: input("user@192.168.1.20", window, cx),
                 name: input("optional", window, cx),
                 address: input("optional", window, cx),
+                docker_socket: input("found automatically", window, cx),
                 error: None,
                 busy: false,
             });
@@ -44,13 +46,16 @@ impl Shell {
         let ssh = form.ssh.read(cx).value().to_string();
         let name = form.name.read(cx).value().to_string();
         let address = form.address.read(cx).value().to_string();
+        let docker_socket = form.docker_socket.read(cx).value().to_string();
         form.busy = true;
         form.error = None;
         let backend = self.backend.clone();
         cx.spawn_in(window, async move |this, cx| {
             // Connecting over SSH can take several seconds.
             let result = cx
-                .background_spawn(async move { backend.add_host(&ssh, &name, &address) })
+                .background_spawn(
+                    async move { backend.add_host(&ssh, &name, &address, &docker_socket) },
+                )
                 .await;
             _ = this.update_in(cx, |this, window, cx| {
                 let Some(form) = &mut this.host_form else {
@@ -59,7 +64,7 @@ impl Shell {
                 form.busy = false;
                 match result {
                     Ok(()) => {
-                        for input in [&form.ssh, &form.name, &form.address] {
+                        for input in [&form.ssh, &form.name, &form.address, &form.docker_socket] {
                             input.update(cx, |i, cx| i.set_value("", window, cx));
                         }
                         window.push_notification("Host added", cx);
@@ -211,7 +216,7 @@ impl Shell {
                 .child(caption("Add a host", cx))
                 .child(div().max_w(px(640.)).text_color(cx.theme().muted_foreground).child(
                     "A machine you can reach with SSH keys (Zevo cannot type a password). It needs Docker; \
-                     Zevo starts one small container there, zevo-edge, to route to its projects.",
+                     Zevo starts one small container there, zevo-edge, to route to its projects. The address can be a name; Zevo follows it if the machine's IP changes.",
                 ))
                 .child(
                     h_flex()
@@ -220,6 +225,7 @@ impl Shell {
                         .child(labelled("SSH destination", &form.ssh, 230.))
                         .child(labelled("Name", &form.name, 150.))
                         .child(labelled("Address for routing", &form.address, 170.))
+                        .child(labelled("Docker socket", &form.docker_socket, 190.))
                         .child(
                             Button::new("add-host")
                                 .primary()

@@ -112,7 +112,14 @@ pub trait Backend: Send + Sync + 'static {
         extras: &[&'static str],
     ) -> Result<String, String>;
     /// Registers a remote host after checking that Docker answers on it.
-    fn add_host(&self, ssh: &str, name: &str, address: &str) -> Result<(), String>;
+    /// `docker_socket` may be empty, in which case Zevo looks for it.
+    fn add_host(
+        &self,
+        ssh: &str,
+        name: &str,
+        address: &str,
+        docker_socket: &str,
+    ) -> Result<(), String>;
     /// Unregisters a host and removes its edge Traefik. `Ok(Some(note))`
     /// when the host was removed but something was left behind there.
     fn remove_host(&self, id: &str) -> Result<Option<String>, String>;
@@ -364,14 +371,20 @@ impl Backend for SystemBackend {
             .map_err(|e| e.to_string())
     }
 
-    fn add_host(&self, ssh: &str, name: &str, address: &str) -> Result<(), String> {
+    fn add_host(
+        &self,
+        ssh: &str,
+        name: &str,
+        address: &str,
+        docker_socket: &str,
+    ) -> Result<(), String> {
         self.tokio
             .block_on(remote::register_host(
                 &self.store,
                 ssh,
                 Some(name),
                 Some(address),
-                None,
+                Some(docker_socket),
             ))
             .map(|_| ())
             .map_err(|e| e.to_string())
@@ -793,7 +806,13 @@ impl Backend for DemoBackend {
         Ok(format!("{}/{slug}", parent.trim().trim_end_matches('/')))
     }
 
-    fn add_host(&self, ssh: &str, name: &str, address: &str) -> Result<(), String> {
+    fn add_host(
+        &self,
+        ssh: &str,
+        name: &str,
+        address: &str,
+        _docker_socket: &str,
+    ) -> Result<(), String> {
         let host = Host::from_ssh(ssh, Some(name), Some(address)).map_err(|e| e.to_string())?;
         let mut hosts = self.hosts.lock().unwrap();
         if hosts.iter().any(|h| h.id == host.id) {
