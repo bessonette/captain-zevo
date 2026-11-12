@@ -63,6 +63,18 @@ impl Editor {
         programs::find(name, &extra)
     }
 
+    /// Folder under the user's configuration directory where this editor
+    /// keeps its state, if it is one of the VS Code family.
+    fn state_folder(self) -> Option<&'static str> {
+        match self {
+            Editor::VsCode => Some("Code"),
+            Editor::Cursor => Some("Cursor"),
+            Editor::Windsurf => Some("Windsurf"),
+            Editor::VsCodium => Some("VSCodium"),
+            Editor::Zed => None,
+        }
+    }
+
     fn attaches_to_devcontainers(self) -> bool {
         !matches!(self, Editor::Zed)
     }
@@ -97,6 +109,159 @@ pub fn remote_devcontainer_uri(ssh: &str, host_folder: &Path, workspace_folder: 
         .map(|b| format!("{b:02x}"))
         .collect();
     format!("vscode-remote://dev-container+{hex}@ssh-remote+{ssh}{workspace_folder}")
+}
+
+/// Addresses of devcontainer windows the editor has recorded in its own
+/// state files.
+///
+/// The editor only brings an open window forward when it is asked for exactly
+/// the address that window has, and the form of that address varies: recent
+/// versions encode a block of settings (the Docker context, the configuration
+/// file) where older ones encoded only the folder. Reusing what the editor
+/// wrote down is the one way to be sure of a match.
+fn recorded_addresses(editor: Editor) -> Vec<String> {
+    let (Some(folder), Some(dirs)) = (editor.state_folder(), directories::BaseDirs::new()) else {
+        return Vec::new();
+    };
+    let storage = dirs.config_dir().join(folder).join("User/globalStorage");
+    let mut found = Vec::new();
+    for file in ["state.vscdb", "storage.json"] {
+        if let Ok(bytes) = std::fs::read(storage.join(file)) {
+            scan_addresses(&bytes, &mut found);
+        }
+    }
+    found
+}
+
+/// Collects every `vscode-remote://dev-container...` address in `bytes`. The
+/// state database is scanned as raw bytes, which needs no database library
+/// and does not depend on which table or key the editor uses this year.
+fn scan_addresses(bytes: &[u8], found: &mut Vec<String>) {
+    const START: &[u8] = b"vscode-remote://dev-container";
+    let mut at = 0;
+    while let Some(offset) = bytes[at..].windows(START.len()).position(|w| w == START) {
+        let begin = at + offset;
+        let len = bytes[begin..]
+            .iter()
+            .position(|b| !(b.is_ascii_alphanumeric() || b"%+@._~/:-".contains(b)))
+            .unwrap_or(bytes.len() - begin);
+        if let Ok(text) = std::str::from_utf8(&bytes[begin..begin + len]) {
+            let text = text.to_string();
+            if !found.contains(&text) {
+                found.push(text);
+            }
+        }
+        at = begin + START.len();
+    }
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let pair = (bytes[i] == b'%')
+            .then(|| text.get(i + 1..i + 3))
+            .flatten()
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match pair {
+            Some(byte) => {
+                out.push(byte);
+                i += 3;
+            }
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_decode(hex: &str) -> Option<String> {
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    let bytes: Option<Vec<u8>> = (0..hex.len())
+        .step_by(2)
+        .map(|i| {
+            hex.get(i..i + 2)
+                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+        })
+        .collect();
+    String::from_utf8(bytes?).ok()
+}
+
+/// The part of an SSH destination that names the machine: `dev@box` and
+/// `box` are the same host to this comparison.
+fn machine(ssh: &str) -> &str {
+    ssh.rsplit_once('@').map_or(ssh, |(_, machine)| machine)
+}
+
+/// Picks, from addresses the editor recorded, the one for this project's
+/// devcontainer: same folder on the host, same machine, same folder inside
+/// the container. Prefers the settings-block form, which is what the editor
+/// writes when it opens a container itself.
+fn pick_recorded(
+    recorded: &[String],
+    host_folder: &Path,
+    host: Option<&Host>,
+    workspace: &str,
+) -> Option<String> {
+    let host_folder = host_folder.to_string_lossy();
+    let mut best: Option<(bool, String)> = None;
+    for address in recorded {
+        let Some(rest) = address.strip_prefix("vscode-remote://") else {
+            continue;
+        };
+        let (authority, path) = match rest.find('/') {
+            Some(slash) => (&rest[..slash], &rest[slash..]),
+            None => continue,
+        };
+        if percent_decode(path).trim_end_matches('/') != workspace.trim_end_matches('/') {
+            continue;
+        }
+        let authority = percent_decode(authority);
+        let Some(container) = authority.strip_prefix("dev-container+") else {
+            continue;
+        };
+        let (hex, over_ssh) = match container.split_once("@ssh-remote+") {
+            Some((hex, ssh)) => (hex, Some(ssh)),
+            None => (container, None),
+        };
+        let same_machine = match (host, over_ssh) {
+            (None, None) => true,
+            (Some(host), Some(ssh)) => {
+                let recorded = machine(ssh);
+                recorded == machine(&host.ssh) || recorded == host.address
+            }
+            _ => false,
+        };
+        if !same_machine {
+            continue;
+        }
+        let Some(decoded) = hex_decode(hex) else {
+            continue;
+        };
+        let settings_block = decoded.starts_with('{');
+        let folder = if settings_block {
+            serde_json::from_str::<serde_json::Value>(&decoded)
+                .ok()
+                .and_then(|v| v.get("hostPath")?.as_str().map(str::to_string))
+        } else {
+            Some(decoded)
+        };
+        if folder.as_deref() != Some(host_folder.as_ref()) {
+            continue;
+        }
+        if best
+            .as_ref()
+            .is_none_or(|(block, _)| settings_block && !block)
+        {
+            best = Some((settings_block, format!("vscode-remote://{authority}{path}")));
+        }
+    }
+    best.map(|(_, address)| address)
 }
 
 /// Folder the project is mounted at inside its container: the configured
@@ -134,6 +299,12 @@ pub fn arguments(editor: Editor, project: &Project, host: Option<&Host>) -> Vec<
     let has_devcontainer = project.kind != crate::model::DevcontainerKind::None;
     let workspace = (editor.attaches_to_devcontainers() && has_devcontainer)
         .then(|| workspace_folder(project, host));
+    if let Some(workspace) = &workspace
+        && let Some(address) =
+            pick_recorded(&recorded_addresses(editor), &project.path, host, workspace)
+    {
+        return vec!["--folder-uri".to_string(), address];
+    }
     arguments_for(editor, project, host, workspace.as_deref())
 }
 
@@ -229,6 +400,59 @@ mod tests {
         assert_eq!(
             arguments_for(Editor::Zed, &p, Some(&host), None),
             ["ssh://dev@10.0.0.5/srv/billing"]
+        );
+    }
+
+    #[test]
+    fn a_recorded_address_is_reused_so_the_open_window_comes_forward() {
+        let folder = Path::new("/Users/me/shop");
+        let plain = devcontainer_uri(folder, "/workspaces/shop").replace('+', "%2B");
+        let block = r#"{"hostPath":"/Users/me/shop","localDocker":false,"settings":{"context":"desktop-linux"}}"#;
+        let hex: String = block.bytes().map(|b| format!("{b:02x}")).collect();
+        // As it sits in the editor's state file, among unrelated bytes.
+        let mut state = b"\x00junk\"".to_vec();
+        state.extend(format!("{plain}\",\"x\":\"").bytes());
+        state.extend(format!("vscode-remote://dev-container%2B{hex}/workspaces/shop\"").bytes());
+        state.extend(
+            format!("vscode-remote://dev-container%2B{hex}/workspaces/shop/src/a.rs\"").bytes(),
+        );
+        state.extend(
+            format!(
+                "vscode-remote://dev-container%2B{hex}@ssh-remote%2B10.0.0.5/workspaces/shop\""
+            )
+            .bytes(),
+        );
+        let mut recorded = Vec::new();
+        scan_addresses(&state, &mut recorded);
+        assert_eq!(recorded.len(), 4, "{recorded:?}");
+
+        // Local: the settings-block form wins over the plain one.
+        assert_eq!(
+            pick_recorded(&recorded, folder, None, "/workspaces/shop").unwrap(),
+            format!("vscode-remote://dev-container+{hex}/workspaces/shop")
+        );
+        // Another folder, or another folder inside the container: no match.
+        assert_eq!(
+            pick_recorded(
+                &recorded,
+                Path::new("/Users/me/other"),
+                None,
+                "/workspaces/shop"
+            ),
+            None
+        );
+        assert_eq!(pick_recorded(&recorded, folder, None, "/srv/app"), None);
+
+        // Remote: matched on the machine, whatever user the editor used.
+        let host = Host::from_ssh("dev@10.0.0.5", Some("buildbox"), None).unwrap();
+        assert_eq!(
+            pick_recorded(&recorded, folder, Some(&host), "/workspaces/shop").unwrap(),
+            format!("vscode-remote://dev-container+{hex}@ssh-remote+10.0.0.5/workspaces/shop")
+        );
+        let elsewhere = Host::from_ssh("dev@10.0.0.6", None, None).unwrap();
+        assert_eq!(
+            pick_recorded(&recorded, folder, Some(&elsewhere), "/workspaces/shop"),
+            None
         );
     }
 
