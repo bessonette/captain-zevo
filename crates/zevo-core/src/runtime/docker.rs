@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 use async_trait::async_trait;
 use bollard::Docker;
 use bollard::models::{
-    ContainerCreateBody, ContainerInspectResponse, EndpointSettings, HostConfig,
+    ContainerCreateBody, ContainerInspectResponse, EndpointSettings, HostConfig, Ipam, IpamConfig,
     NetworkConnectRequest, NetworkCreateRequest, NetworkDisconnectRequest, NetworkingConfig,
     PortBinding, RestartPolicy, RestartPolicyNameEnum,
 };
@@ -24,6 +24,14 @@ pub struct DockerRuntime {
 }
 
 const MANAGED_LABEL: &str = "dev.captain-zevo.managed";
+
+/// Address ranges tried, in order, for a network Zevo creates.
+const NETWORK_SUBNETS: [&str; 4] = [
+    "10.213.77.0/24",
+    "10.213.78.0/24",
+    "10.213.79.0/24",
+    "10.213.80.0/24",
+];
 
 impl DockerRuntime {
     /// Connects to a specific Docker socket, such as one forwarded from
@@ -104,6 +112,19 @@ fn live_socket() -> Option<std::path::PathBuf> {
 
 fn err(e: bollard::errors::Error) -> Error {
     Error::Runtime(e.to_string())
+}
+
+/// Explains the one connect failure that has a known cause and fix.
+fn connect_error(network: &str, message: &str) -> Error {
+    if message.contains("conflicts with existing route") {
+        return Error::Runtime(format!(
+            "the container already uses the address range of the '{network}' network inside \
+             itself (usually because it runs its own Docker). On that machine, remove \
+             Zevo's Traefik container and the network (`docker network rm {network}`); \
+             Zevo recreates both on a different range. Docker said: {message}"
+        ));
+    }
+    Error::Runtime(message.to_string())
 }
 
 fn is_status(e: &bollard::errors::Error, code: u16) -> bool {
@@ -207,6 +228,28 @@ impl Runtime for DockerRuntime {
             Err(e) if is_status(&e, 404) => {}
             Err(e) => return Err(err(e)),
         }
+        // Docker's default ranges (172.17-31.x, 192.168.x) are the same ones
+        // a Docker running inside a project container picks for its own
+        // networks, and a container cannot join a network whose range it
+        // already uses inside itself. Ask for a range outside those first.
+        for subnet in NETWORK_SUBNETS {
+            let request = NetworkCreateRequest {
+                name: name.to_string(),
+                ipam: Some(Ipam {
+                    config: Some(vec![IpamConfig {
+                        subnet: Some(subnet.to_string()),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            match self.docker.create_network(request).await {
+                Ok(_) => return Ok(true),
+                // Taken or not allowed here: try the next one.
+                Err(e) => tracing::debug!("network {name} on {subnet}: {e}"),
+            }
+        }
         let request = NetworkCreateRequest {
             name: name.to_string(),
             ..Default::default()
@@ -226,7 +269,7 @@ impl Runtime for DockerRuntime {
         self.docker
             .connect_network(network, request)
             .await
-            .map_err(err)
+            .map_err(|e| connect_error(network, &e.to_string()))
     }
 
     async fn disconnect(&self, container: &str, network: &str) -> Result<()> {
@@ -560,5 +603,25 @@ impl Runtime for DockerRuntime {
             return Err(err(e));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connect_error_explains_an_address_range_clash() {
+        let clash = "failed to add interface veth0 to sandbox: cannot program address \
+                     172.19.0.3/16 in sandbox interface because it conflicts with existing route";
+        let Error::Runtime(text) = connect_error("zevo", clash) else {
+            panic!("expected a runtime error");
+        };
+        assert!(text.contains("docker network rm zevo"), "{text}");
+        assert!(text.contains(clash), "{text}");
+        let Error::Runtime(other) = connect_error("zevo", "no such container") else {
+            panic!("expected a runtime error");
+        };
+        assert_eq!(other, "no such container");
     }
 }
