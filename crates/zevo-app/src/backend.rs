@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use zevo_core::certs::{self, Issuer as _};
 use zevo_core::health::Listening;
 use zevo_core::ide::{self, Editor};
+use zevo_core::lifecycle;
 use zevo_core::model::{
     DevcontainerKind, Host, LOCAL_HOST_ID, Project, Route, Settings, Target, TraefikMode,
     TraefikSettings,
@@ -30,6 +31,8 @@ pub struct ProjectView {
     pub status: ProjectStatus,
     /// Traefik config generated for the project; empty before setup.
     pub yaml: String,
+    /// Why the container cannot be built or rebuilt from here, if it cannot.
+    pub build_blocker: Option<String>,
 }
 
 /// A consistent picture of the system at one moment.
@@ -114,6 +117,14 @@ pub trait Backend: Send + Sync + 'static {
     fn open_in_editor(&self, slug: &str, editor: Editor) -> Result<(), String>;
     /// Remembers which editor "Open in editor" uses.
     fn set_editor(&self, editor: Editor) -> Result<(), String>;
+    /// Starts the project's container, building it if it does not exist.
+    /// Building can take minutes.
+    fn start(&self, slug: &str) -> Result<(), String>;
+    fn stop(&self, slug: &str) -> Result<(), String>;
+    /// Rebuilds the container from its devcontainer.json, replacing it.
+    fn rebuild(&self, slug: &str) -> Result<(), String>;
+    /// The end of the container's output.
+    fn logs(&self, slug: &str, lines: usize) -> Result<String, String>;
 }
 
 /// The real system: the on-disk registry and the local container runtime.
@@ -137,6 +148,26 @@ const RETRY_AFTER: Duration = Duration::from_secs(30);
 impl SystemBackend {
     /// Brings the connections in line with the registered hosts: opens new
     /// ones, reopens dead ones, and drops those for removed hosts.
+    /// The runtime a project's container lives on. Remote projects reuse the
+    /// open connection to their host; if there is none right now (a load has
+    /// it, or it failed), a short-lived one is opened and returned so it
+    /// lives as long as the runtime is used.
+    fn project_runtime(
+        &self,
+        project: &Project,
+    ) -> Result<(Option<remote::Tunnel>, DockerRuntime), String> {
+        if project.host == LOCAL_HOST_ID {
+            return Ok((None, DockerRuntime::connect().map_err(|e| e.to_string())?));
+        }
+        if let Some(Link::Open(_, runtime)) = self.links.lock().unwrap().get(&project.host) {
+            return Ok((None, runtime.clone()));
+        }
+        let host = self.store.host(&project.host).map_err(|e| e.to_string())?;
+        let tunnel = remote::Tunnel::open(&host).map_err(|e| e.to_string())?;
+        let runtime = tunnel.runtime().map_err(|e| e.to_string())?;
+        Ok((Some(tunnel), runtime))
+    }
+
     fn refresh_links(links: &mut BTreeMap<String, Link>, hosts: &[Host]) {
         links.retain(|id, _| hosts.iter().any(|h| &h.id == id));
         let to_open: Vec<Host> = hosts
@@ -283,6 +314,7 @@ impl Backend for SystemBackend {
                     }
                     .unwrap_or_default();
                     ProjectView {
+                        build_blocker: lifecycle::build_blocker(&project),
                         project,
                         status,
                         yaml,
@@ -385,6 +417,41 @@ impl Backend for SystemBackend {
             .save_settings(&settings)
             .map_err(|e| e.to_string())
     }
+
+    fn start(&self, slug: &str) -> Result<(), String> {
+        let project = self.store.project(slug).map_err(|e| e.to_string())?;
+        let (_tunnel, runtime) = self.project_runtime(&project)?;
+        let started = self
+            .tokio
+            .block_on(lifecycle::start_existing(&runtime, &project))
+            .map_err(|e| e.to_string())?;
+        if started {
+            return Ok(());
+        }
+        lifecycle::up(&project, false).map_err(|e| e.to_string())
+    }
+
+    fn stop(&self, slug: &str) -> Result<(), String> {
+        let project = self.store.project(slug).map_err(|e| e.to_string())?;
+        let (_tunnel, runtime) = self.project_runtime(&project)?;
+        self.tokio
+            .block_on(lifecycle::stop(&runtime, &project))
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    fn rebuild(&self, slug: &str) -> Result<(), String> {
+        let project = self.store.project(slug).map_err(|e| e.to_string())?;
+        lifecycle::up(&project, true).map_err(|e| e.to_string())
+    }
+
+    fn logs(&self, slug: &str, lines: usize) -> Result<String, String> {
+        let project = self.store.project(slug).map_err(|e| e.to_string())?;
+        let (_tunnel, runtime) = self.project_runtime(&project)?;
+        self.tokio
+            .block_on(lifecycle::logs(&runtime, &project, lines))
+            .map_err(|e| e.to_string())
+    }
 }
 
 /// Example data for `--demo`, screenshots and tests. Touches nothing real.
@@ -402,6 +469,17 @@ impl DemoBackend {
         demo.projects.lock().unwrap().clear();
         *demo.set_up.lock().unwrap() = false;
         demo
+    }
+
+    fn set_state(&self, slug: &str, state: ContainerState) -> Result<(), String> {
+        let mut projects = self.projects.lock().unwrap();
+        let entry = projects
+            .iter_mut()
+            .find(|(p, _, _)| p.slug == slug)
+            .ok_or_else(|| format!("project '{slug}' is not registered"))?;
+        entry.1 = state;
+        entry.2.get_or_insert("example-container-1");
+        Ok(())
     }
 
     fn check(&self, project: &Project) -> Result<(), String> {
@@ -580,6 +658,9 @@ impl Backend for DemoBackend {
                     });
                 }
                 ProjectView {
+                    build_blocker: (project.host != LOCAL_HOST_ID).then(|| {
+                        "building containers on remote hosts is not supported yet".to_string()
+                    }),
                     status: ProjectStatus {
                         slug: project.slug.clone(),
                         container: container.map(Into::into),
@@ -786,6 +867,35 @@ impl Backend for DemoBackend {
     fn set_editor(&self, editor: Editor) -> Result<(), String> {
         *self.editor.lock().unwrap() = Some(editor);
         Ok(())
+    }
+
+    fn start(&self, slug: &str) -> Result<(), String> {
+        self.set_state(slug, ContainerState::Running)
+    }
+
+    fn stop(&self, slug: &str) -> Result<(), String> {
+        self.set_state(slug, ContainerState::Stopped)
+    }
+
+    fn rebuild(&self, slug: &str) -> Result<(), String> {
+        // Long enough to see the busy state.
+        std::thread::sleep(Duration::from_millis(1500));
+        self.set_state(slug, ContainerState::Running)
+    }
+
+    fn logs(&self, slug: &str, _lines: usize) -> Result<String, String> {
+        let projects = self.projects.lock().unwrap();
+        let (project, state, _) = projects
+            .iter()
+            .find(|(p, _, _)| p.slug == slug)
+            .ok_or_else(|| format!("project '{slug}' is not registered"))?;
+        if *state == ContainerState::Missing {
+            return Err("this project has no container yet".into());
+        }
+        let port = project.routes.first().map(|r| r.port).unwrap_or(3000);
+        Ok(format!(
+            "> dev\n> vite --host 0.0.0.0 --port {port}\n\n  VITE ready in 412 ms\n\n  \u{279c}  Local:   http://localhost:{port}/\n  \u{279c}  Network: http://172.18.0.4:{port}/\n12:04:19 GET / 200 14ms\n12:04:19 GET /assets/app.css 200 3ms\n12:05:02 GET /health 200 1ms\n"
+        ))
     }
 }
 

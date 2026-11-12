@@ -32,6 +32,11 @@ mod setup;
 
 const LOGO: &[u8] = include_bytes!("../../../assets/logo.svg");
 
+/// Index of the Logs tab on a project page.
+const LOGS_TAB: usize = 2;
+/// Lines of container output fetched for the Logs tab.
+const LOG_LINES: usize = 300;
+
 #[derive(Clone, PartialEq)]
 enum Page {
     /// Project list, optionally limited to one host.
@@ -59,6 +64,13 @@ pub struct Shell {
     add: Option<add::AddForm>,
     setup: setup::SetupState,
     host_form: Option<hosts::HostForm>,
+    /// Project slug to the action running on it ("Starting", ...).
+    busy: std::collections::BTreeMap<String, &'static str>,
+    /// Why the last action on a project failed, shown on its page.
+    action_error: Option<(String, String)>,
+    /// Output shown on the Logs tab, for the named project.
+    logs: Option<(String, Result<String, String>)>,
+    logs_loading: bool,
     _search_changed: Subscription,
 }
 
@@ -90,6 +102,10 @@ impl Shell {
             add: None,
             setup: setup::SetupState::default(),
             host_form: None,
+            busy: Default::default(),
+            action_error: None,
+            logs: None,
+            logs_loading: false,
             _search_changed,
         };
         shell.reload(cx);
@@ -139,6 +155,9 @@ impl Shell {
                         }
                         this.snapshot = Some(snapshot);
                         this.error = None;
+                        if let (Page::Project(slug), LOGS_TAB) = (&this.page, this.tab) {
+                            this.load_logs(slug.clone(), cx);
+                        }
                     }
                     Err(e) => this.error = Some(e),
                 }
@@ -165,6 +184,59 @@ impl Shell {
                 Err(e) => {
                     window.push_notification(format!("Could not open {}: {e}", editor.name()), cx)
                 }
+            });
+        })
+        .detach();
+    }
+
+    /// Runs a container action in the background, marking the project busy.
+    fn run_action(
+        &mut self,
+        slug: String,
+        label: &'static str,
+        done: &'static str,
+        work: impl FnOnce(&dyn Backend, &str) -> Result<(), String> + Send + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.busy.insert(slug.clone(), label);
+        self.action_error = None;
+        let backend = self.backend.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let target = slug.clone();
+            let result = cx
+                .background_spawn(async move { work(backend.as_ref(), &target) })
+                .await;
+            _ = this.update_in(cx, |this, window, cx| {
+                this.busy.remove(&slug);
+                match result {
+                    Ok(()) => window.push_notification(format!("{done} {slug}"), cx),
+                    // Build output can be long; show it on the page, not in a toast.
+                    Err(e) => this.action_error = Some((slug.clone(), e)),
+                }
+                this.reload_now(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn load_logs(&mut self, slug: String, cx: &mut Context<Self>) {
+        if self.logs_loading {
+            return;
+        }
+        self.logs_loading = true;
+        let backend = self.backend.clone();
+        cx.spawn(async move |this, cx| {
+            let target = slug.clone();
+            let result = cx
+                .background_spawn(async move { backend.logs(&target, LOG_LINES) })
+                .await;
+            _ = this.update(cx, |this, cx| {
+                this.logs_loading = false;
+                this.logs = Some((slug, result));
+                cx.notify();
             });
         })
         .detach();
@@ -686,6 +758,92 @@ impl Shell {
         )
     }
 
+    /// Start, Stop and Rebuild for a project, according to its state.
+    fn lifecycle_buttons(&self, view: &ProjectView, cx: &mut Context<Self>) -> Vec<Button> {
+        let slug = view.project.slug.clone();
+        if let Some(label) = self.busy.get(&slug) {
+            return vec![
+                Button::new("busy")
+                    .small()
+                    .outline()
+                    .loading(true)
+                    .label(*label),
+            ];
+        }
+        let can_build = view.build_blocker.is_none();
+        let mut buttons = Vec::new();
+        match view.status.state {
+            ContainerState::Running => buttons.push({
+                let slug = slug.clone();
+                Button::new("stop")
+                    .small()
+                    .outline()
+                    .icon(IconName::Pause)
+                    .label("Stop")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.run_action(
+                            slug.clone(),
+                            "Stopping…",
+                            "Stopped",
+                            |b, s| b.stop(s),
+                            window,
+                            cx,
+                        )
+                    }))
+            }),
+            // A stopped container can always be started; a missing one has to be built.
+            ContainerState::Stopped | ContainerState::Missing
+                if view.status.state == ContainerState::Stopped || can_build =>
+            {
+                let building = view.status.state == ContainerState::Missing;
+                let slug = slug.clone();
+                buttons.push(
+                    Button::new("start")
+                        .small()
+                        .outline()
+                        .icon(IconName::Play)
+                        .label(if building { "Build and start" } else { "Start" })
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.run_action(
+                                slug.clone(),
+                                if building {
+                                    "Building…"
+                                } else {
+                                    "Starting…"
+                                },
+                                "Started",
+                                |b, s| b.start(s),
+                                window,
+                                cx,
+                            )
+                        })),
+                )
+            }
+            _ => {}
+        }
+        if can_build && view.status.state != ContainerState::Missing {
+            buttons.push(
+                Button::new("rebuild")
+                    .small()
+                    .outline()
+                    .icon(IconName::RefreshCw)
+                    .label("Rebuild")
+                    .tooltip("Recreate the container from its devcontainer.json")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.run_action(
+                            slug.clone(),
+                            "Rebuilding…",
+                            "Rebuilt",
+                            |b, s| b.rebuild(s),
+                            window,
+                            cx,
+                        )
+                    })),
+            );
+        }
+        buttons
+    }
+
     fn render_project(
         &self,
         snapshot: &Snapshot,
@@ -711,6 +869,7 @@ impl Shell {
                 .child(status_pill(view, cx)),
             h_flex()
                 .gap_2()
+                .children(self.lifecycle_buttons(view, cx))
                 .child(
                     Button::new("remove")
                         .small()
@@ -776,11 +935,19 @@ impl Shell {
             .children([
                 Tab::new().label("Overview"),
                 Tab::new().label(format!("Routes ({})", p.routes.len())),
+                Tab::new().label("Logs"),
                 Tab::new().label("Config"),
             ])
-            .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                this.tab = *ix;
-                cx.notify();
+            .on_click(cx.listener({
+                let slug = p.slug.clone();
+                move |this, ix: &usize, _, cx| {
+                    this.tab = *ix;
+                    if *ix == LOGS_TAB {
+                        this.logs = None;
+                        this.load_logs(slug.clone(), cx);
+                    }
+                    cx.notify();
+                }
             }));
 
         let body = match self.tab {
@@ -811,6 +978,22 @@ impl Shell {
                 v_flex()
                     .gap_5()
                     .children(notice)
+                    .when_some(
+                        self.action_error.as_ref().filter(|(slug, _)| slug == &p.slug).map(|(_, e)| e.clone()),
+                        |col, e| {
+                            col.child(
+                                v_flex()
+                                    .gap_2()
+                                    .p_3()
+                                    .rounded(cx.theme().radius)
+                                    .border_1()
+                                    .border_color(cx.theme().danger.opacity(0.5))
+                                    .bg(cx.theme().danger.opacity(0.08))
+                                    .child(div().font_medium().child("The last action did not finish"))
+                                    .children(e.lines().map(|line| mono(line.to_string(), cx))),
+                            )
+                        },
+                    )
                     .when(!loopback.is_empty(), |col| {
                         col.child(Alert::warning(
                             "loopback",
@@ -972,6 +1155,52 @@ impl Shell {
                             }))
                     })
                 }),
+            LOGS_TAB => {
+                let slug = p.slug.clone();
+                let shown = self.logs.as_ref().filter(|(for_slug, _)| for_slug == &p.slug);
+                v_flex()
+                    .gap_2()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(caption("Container output", cx))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!("Last {LOG_LINES} lines, refreshed every few seconds.")),
+                            )
+                            .child(
+                                Button::new("refresh-logs")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::RefreshCw)
+                                    .tooltip("Refresh")
+                                    .loading(self.logs_loading)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.load_logs(slug.clone(), cx)
+                                    })),
+                            ),
+                    )
+                    .child(match shown {
+                        None => div().text_color(cx.theme().muted_foreground).child("Loading…"),
+                        Some((_, Err(e))) => div().text_color(cx.theme().muted_foreground).child(e.clone()),
+                        Some((_, Ok(text))) if text.trim().is_empty() => div()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("The container has not printed anything."),
+                        Some((_, Ok(text))) => v_flex()
+                            .p_3()
+                            .rounded(cx.theme().radius)
+                            .bg(cx.theme().muted)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            // One element per line; an empty line still takes a row.
+                            .children(text.lines().map(|line| {
+                                mono(if line.is_empty() { " ".to_string() } else { line.to_string() }, cx)
+                            })),
+                    })
+            }
             _ => v_flex()
                 .gap_2()
                 .child(

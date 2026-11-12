@@ -8,6 +8,7 @@ pub mod envfile;
 pub mod error;
 pub mod health;
 pub mod ide;
+pub mod lifecycle;
 pub mod model;
 pub mod programs;
 pub mod reconcile;

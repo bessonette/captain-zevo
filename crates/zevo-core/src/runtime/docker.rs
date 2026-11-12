@@ -18,6 +18,7 @@ use futures_util::TryStreamExt;
 use super::{ContainerInfo, Mount, Runtime, TraefikSpec};
 use crate::{Error, Result};
 
+#[derive(Clone)]
 pub struct DockerRuntime {
     docker: Docker,
 }
@@ -237,6 +238,34 @@ impl Runtime for DockerRuntime {
             .disconnect_network(network, request)
             .await
             .map_err(err)
+    }
+
+    async fn start(&self, container: &str) -> Result<()> {
+        self.docker
+            .start_container(container, None)
+            .await
+            .map_err(err)
+    }
+
+    async fn stop(&self, container: &str) -> Result<()> {
+        self.docker
+            .stop_container(container, None)
+            .await
+            .map_err(err)
+    }
+
+    async fn logs(&self, container: &str, lines: usize) -> Result<String> {
+        let options = bollard::query_parameters::LogsOptionsBuilder::new()
+            .stdout(true)
+            .stderr(true)
+            .tail(&lines.to_string())
+            .build();
+        let mut stream = self.docker.logs(container, Some(options));
+        let mut printed = Vec::new();
+        while let Some(chunk) = stream.try_next().await.map_err(err)? {
+            printed.extend_from_slice(&chunk.into_bytes());
+        }
+        Ok(String::from_utf8_lossy(&printed).into_owned())
     }
 
     async fn exec(&self, container: &str, command: &[&str]) -> Result<String> {

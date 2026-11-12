@@ -103,6 +103,12 @@ pub trait Runtime: Send + Sync {
     async fn ensure_network(&self, name: &str) -> Result<bool>;
     async fn connect(&self, container: &str, network: &str, aliases: &[String]) -> Result<()>;
     async fn disconnect(&self, container: &str, network: &str) -> Result<()>;
+    /// Starts a stopped container.
+    async fn start(&self, container: &str) -> Result<()>;
+    /// Stops a running container.
+    async fn stop(&self, container: &str) -> Result<()>;
+    /// The last `lines` lines a container printed (both output streams).
+    async fn logs(&self, container: &str, lines: usize) -> Result<String>;
     /// Runs a command in a running container and returns what it printed.
     async fn exec(&self, container: &str, command: &[&str]) -> Result<String>;
     /// Makes sure the edge Traefik exists and is running. Returns true if it

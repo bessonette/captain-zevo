@@ -73,6 +73,8 @@ More commands:
 | `zevo route add <slug> [sub:]port` / `zevo route rm <slug> [sub]` | Edit routes |
 | `zevo show <slug>` | Show a project and its generated Traefik config |
 | `zevo rm <slug>` | Unregister and remove its routes |
+| `zevo up <slug> [--rebuild]` / `zevo down <slug>` | Start (building if needed), rebuild, or stop a project's container |
+| `zevo logs <slug> [-n 200]` | Print the end of the container's output |
 | `zevo discover` | List devcontainers on this machine that are not registered yet |
 | `zevo open <slug> [--editor zed]` | Open a project in VS Code, Cursor, Windsurf, VSCodium or Zed, attached to its devcontainer |
 | `zevo doctor` | Check the runtime, Traefik, the route directory and DNS |
@@ -198,9 +200,10 @@ Hand edits take effect on the next `zevo reconcile`.
 1. **Core and CLI, local projects** — done.
 2. **Desktop app** — done for local projects: first-run setup, adding projects,
    editing routes, and the project, Traefik and settings screens.
-3. **Lifecycle and editors** — discovery of running devcontainers and open in
-   VS Code (and forks) or Zed are done. Still to come: start/stop/rebuild,
-   logs, new projects from templates, JetBrains.
+3. **Lifecycle and editors** — done: discovery, open in VS Code (and forks) or
+   Zed, start/stop/rebuild and logs. Building needs the `devcontainer`
+   command-line tool (`npm install -g @devcontainers/cli`). Still to come: new
+   projects from templates, JetBrains.
 4. **Remote hosts** — built: hosts over SSH, discovery, and an edge Traefik per
    host. Not yet: re-reading a remote project's declaration after it is added,
    and its env file.

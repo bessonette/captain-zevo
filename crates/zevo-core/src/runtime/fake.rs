@@ -20,6 +20,8 @@ struct State {
     down: Option<String>,
     /// (container name, path) to content, for the file operations.
     files: std::collections::BTreeMap<(String, String), String>,
+    /// Container name to its log output.
+    logs: std::collections::BTreeMap<String, String>,
     /// Container name to what `exec` prints in it.
     exec_output: std::collections::BTreeMap<String, String>,
 }
@@ -53,6 +55,15 @@ impl FakeRuntime {
 
     pub fn networks(&self) -> Vec<String> {
         self.state.lock().unwrap().networks.clone()
+    }
+
+    /// Sets the container's log output.
+    pub fn set_logs(&self, container: &str, output: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .logs
+            .insert(container.to_string(), output.to_string());
     }
 
     /// Sets what any command run in the container prints.
@@ -124,6 +135,30 @@ impl Runtime for FakeRuntime {
         self.with(|s| {
             find(s, container)?.networks.remove(network);
             Ok(())
+        })
+    }
+
+    async fn start(&self, container: &str) -> Result<()> {
+        self.with(|s| {
+            find(s, container)?.running = true;
+            Ok(())
+        })
+    }
+
+    async fn stop(&self, container: &str) -> Result<()> {
+        self.with(|s| {
+            find(s, container)?.running = false;
+            Ok(())
+        })
+    }
+
+    async fn logs(&self, container: &str, lines: usize) -> Result<String> {
+        self.with(|s| {
+            let name = find(s, container)?.name.clone();
+            let all = s.logs.get(&name).cloned().unwrap_or_default();
+            let kept: Vec<&str> = all.lines().collect();
+            let tail = &kept[kept.len().saturating_sub(lines)..];
+            Ok(tail.iter().map(|l| format!("{l}\n")).collect())
         })
     }
 

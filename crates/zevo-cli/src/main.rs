@@ -12,7 +12,7 @@ use zevo_core::model::{Host, LOCAL_HOST_ID, Route, Target};
 use zevo_core::reconcile::{self, Action, ContainerState, Report};
 use zevo_core::runtime::{DockerRuntime, Runtime};
 use zevo_core::store::Store;
-use zevo_core::{doctor, register, remote, setup, traefik};
+use zevo_core::{doctor, lifecycle, register, remote, setup, traefik};
 
 #[derive(Parser)]
 #[command(
@@ -58,6 +58,22 @@ enum Command {
     Doctor,
     /// List devcontainers, here and on remote hosts, that are not registered yet.
     Discover,
+    /// Start a project's container, building it first if it does not exist.
+    Up {
+        slug: String,
+        /// Rebuild the container from its devcontainer.json, replacing it.
+        #[arg(long)]
+        rebuild: bool,
+    },
+    /// Stop a project's container.
+    Down { slug: String },
+    /// Print the end of a project's container output.
+    Logs {
+        slug: String,
+        /// Number of lines to show.
+        #[arg(short = 'n', long, default_value_t = 200)]
+        lines: usize,
+    },
     /// Manage other machines that run project containers.
     Host {
         #[command(subcommand)]
@@ -190,6 +206,20 @@ fn reason(e: zevo_core::Error) -> String {
         zevo_core::Error::Runtime(message) => message,
         other => other.to_string(),
     }
+}
+
+/// The runtime a project's container lives on. For a remote project the SSH
+/// connection is returned too and must be kept until the runtime is done with.
+async fn runtime_for(
+    store: &Store,
+    project: &zevo_core::model::Project,
+) -> Result<(Option<remote::Tunnel>, DockerRuntime)> {
+    if project.host == LOCAL_HOST_ID {
+        return Ok((None, require_runtime().await?));
+    }
+    let tunnel = remote::Tunnel::open(&store.host(&project.host)?)?;
+    let runtime = tunnel.runtime()?;
+    Ok((Some(tunnel), runtime))
 }
 
 async fn require_runtime() -> Result<DockerRuntime> {
@@ -335,6 +365,33 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 }
             }
         },
+        Command::Up { slug, rebuild } => {
+            let project = store.project(&slug)?;
+            let (_tunnel, runtime) = runtime_for(&store, &project).await?;
+            if !rebuild && lifecycle::start_existing(&runtime, &project).await? {
+                println!("Started {slug}.");
+            } else {
+                println!("Building the container for {slug}; this can take a few minutes...");
+                tokio::task::spawn_blocking(move || lifecycle::up(&project, rebuild)).await??;
+                println!("{slug} is up.");
+            }
+            // Attach the container and point the routes at it.
+            print_actions(&reconcile_once(&store).await?);
+        }
+        Command::Down { slug } => {
+            let project = store.project(&slug)?;
+            let (_tunnel, runtime) = runtime_for(&store, &project).await?;
+            if lifecycle::stop(&runtime, &project).await? {
+                println!("Stopped {slug}.");
+            } else {
+                println!("{slug} was not running.");
+            }
+        }
+        Command::Logs { slug, lines } => {
+            let project = store.project(&slug)?;
+            let (_tunnel, runtime) = runtime_for(&store, &project).await?;
+            print!("{}", lifecycle::logs(&runtime, &project, lines).await?);
+        }
         Command::Discover => {
             let report = reconcile_scope(&store, true).await?;
             if cli.json {
