@@ -46,6 +46,8 @@ pub struct Shell {
     snapshot: Option<Snapshot>,
     error: Option<String>,
     loading: bool,
+    /// A change arrived while a load was running.
+    reload_again: bool,
     page: Page,
     tab: usize,
     search: Entity<InputState>,
@@ -75,6 +77,7 @@ impl Shell {
             snapshot: None,
             error: None,
             loading: false,
+            reload_again: false,
             page: Page::Projects(None),
             tab: 0,
             search,
@@ -104,14 +107,26 @@ impl Shell {
         }
     }
 
-    /// Reloads even if a load is already running, for use right after a change.
+    /// Reloads right after a change. Loads never overlap: two at once would
+    /// reconcile concurrently, and the older one could finish last and show
+    /// (and write) stale state. If one is running, another follows it.
     fn reload_now(&mut self, cx: &mut Context<Self>) {
+        if self.loading {
+            self.reload_again = true;
+            return;
+        }
         self.loading = true;
         let backend = self.backend.clone();
         cx.spawn(async move |this, cx| {
             let result = cx.background_spawn(async move { backend.load() }).await;
             _ = this.update(cx, |this, cx| {
                 this.loading = false;
+                if std::mem::take(&mut this.reload_again) {
+                    // Something changed while this load ran; its result is
+                    // already out of date.
+                    this.reload_now(cx);
+                    return;
+                }
                 match result {
                     Ok(snapshot) => {
                         if snapshot.needs_setup() && !this.setup_searched() {

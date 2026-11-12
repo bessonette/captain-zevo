@@ -95,7 +95,7 @@ impl Backend for SystemBackend {
     fn load(&self) -> Result<Snapshot, String> {
         self.tokio.block_on(async {
             let settings = self.store.settings().map_err(|e| e.to_string())?;
-            let projects = self.store.projects().map_err(|e| e.to_string())?;
+            let mut projects = self.store.projects().map_err(|e| e.to_string())?;
 
             let docker = DockerRuntime::connect().map_err(|e| e.to_string());
             let (docker, runtime) = match docker {
@@ -128,6 +128,8 @@ impl Backend for SystemBackend {
                     )
                     .await
                     .map_err(|e| e.to_string())?;
+                    // Reconciling may have re-read declared routes from disk.
+                    projects = self.store.projects().map_err(|e| e.to_string())?;
                     snapshot.warnings = report.warnings;
                     snapshot.routers =
                         traefik::scan(&traefik_settings.dynamic_dir).map_err(|e| e.to_string())?;

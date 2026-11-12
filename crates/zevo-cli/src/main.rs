@@ -115,6 +115,9 @@ enum RouteCommand {
     Rm {
         slug: String,
         subdomain: Option<String>,
+        /// Path prefix of the route to remove, if it has one.
+        #[arg(long)]
+        path_prefix: Option<String>,
     },
 }
 
@@ -441,13 +444,23 @@ async fn cmd_route(store: &Store, command: RouteCommand) -> Result<()> {
                 .push(parse_route(&route, address.as_deref(), path_prefix)?);
             project
         }
-        RouteCommand::Rm { slug, subdomain } => {
+        RouteCommand::Rm {
+            slug,
+            subdomain,
+            path_prefix,
+        } => {
             let mut project = store.project(&slug)?;
             register::ensure_routes_editable(&project)?;
             let before = project.routes.len();
-            project.routes.retain(|r| r.subdomain != subdomain);
+            // Exactly the route with this subdomain and path prefix; routes
+            // with an exact hostname are not addressed by subdomain.
+            project.routes.retain(|r| {
+                !(r.host.is_none() && r.subdomain == subdomain && r.path_prefix == path_prefix)
+            });
             if project.routes.len() == before {
-                bail!("project '{slug}' has no such route");
+                bail!(
+                    "project '{slug}' has no such route (if it has a path prefix, pass --path-prefix)"
+                );
             }
             project
         }

@@ -148,8 +148,10 @@ struct Files {
 fn files(slug: &str, dynamic_dir: &Path) -> Files {
     let dir = dynamic_dir.join(CERT_DIR);
     Files {
-        cert: dir.join(format!("{slug}.pem")),
-        key: dir.join(format!("{slug}-key.pem")),
+        // Slugs contain no dots, so `<slug>.key.pem` cannot be another
+        // project's certificate.
+        cert: dir.join(format!("{slug}.cert.pem")),
+        key: dir.join(format!("{slug}.key.pem")),
         names: dir.join(format!("{slug}.names")),
     }
 }
@@ -160,10 +162,26 @@ pub fn existing(slug: &str, traefik: &TraefikSettings) -> Option<(String, String
     let f = files(slug, &traefik.dynamic_dir);
     (f.cert.is_file() && f.key.is_file()).then(|| {
         (
-            traefik.path_in_traefik(&format!("{CERT_DIR}/{slug}.pem")),
-            traefik.path_in_traefik(&format!("{CERT_DIR}/{slug}-key.pem")),
+            traefik.path_in_traefik(&format!("{CERT_DIR}/{slug}.cert.pem")),
+            traefik.path_in_traefik(&format!("{CERT_DIR}/{slug}.key.pem")),
         )
     })
+}
+
+/// Whether the project already has a certificate that covers its current
+/// hostnames and is not due for renewal. Cheap: reads two small files.
+pub fn is_current(project: &Project, settings: &Settings) -> bool {
+    let Some(traefik) = &settings.traefik else {
+        return false;
+    };
+    let wanted = names(project, settings);
+    let f = files(&project.slug, &traefik.dynamic_dir);
+    !wanted.is_empty()
+        && f.key.is_file()
+        && std::fs::read_to_string(&f.names).is_ok_and(|have| have == wanted.join("\n"))
+        && std::fs::metadata(&f.cert)
+            .and_then(|m| m.modified())
+            .is_ok_and(|at| SystemTime::now().duration_since(at).unwrap_or_default() < RENEW_AFTER)
 }
 
 /// Makes sure the project has a current certificate for its hostnames.
@@ -177,22 +195,15 @@ pub fn ensure(project: &Project, settings: &Settings, issuer: &dyn Issuer) -> Re
         remove(&project.slug, &traefik.dynamic_dir)?;
         return Ok(false);
     }
-    let f = files(&project.slug, &traefik.dynamic_dir);
-    let listed = wanted.join("\n");
-    let fresh = f.key.is_file()
-        && std::fs::read_to_string(&f.names).is_ok_and(|have| have == listed)
-        && std::fs::metadata(&f.cert)
-            .and_then(|m| m.modified())
-            .is_ok_and(|at| SystemTime::now().duration_since(at).unwrap_or_default() < RENEW_AFTER);
-    if fresh {
+    if is_current(project, settings) {
         return Ok(false);
     }
-
+    let f = files(&project.slug, &traefik.dynamic_dir);
     let dir = traefik.dynamic_dir.join(CERT_DIR);
     std::fs::create_dir_all(&dir)
         .map_err(|e| Error::io(format!("creating {}", dir.display()), e))?;
     issuer.issue(&wanted, &f.cert, &f.key)?;
-    std::fs::write(&f.names, listed)
+    std::fs::write(&f.names, wanted.join("\n"))
         .map_err(|e| Error::io(format!("writing {}", f.names.display()), e))?;
     Ok(true)
 }
@@ -307,8 +318,8 @@ mod tests {
         assert_eq!(
             existing("shop", s.traefik.as_ref().unwrap()),
             Some((
-                "/etc/traefik/dynamic/zevo-certs/shop.pem".to_string(),
-                "/etc/traefik/dynamic/zevo-certs/shop-key.pem".to_string()
+                "/etc/traefik/dynamic/zevo-certs/shop.cert.pem".to_string(),
+                "/etc/traefik/dynamic/zevo-certs/shop.key.pem".to_string()
             ))
         );
 

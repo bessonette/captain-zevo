@@ -203,7 +203,10 @@ pub async fn reconcile_with(
         }
 
         // HTTPS entrypoints need a certificate browsers trust for these names.
-        if traefik_settings.tls && !project.routes.is_empty() {
+        if traefik_settings.tls
+            && !project.routes.is_empty()
+            && !certs::is_current(project, &settings)
+        {
             // Settings saved before Zevo recorded where a containerised Traefik
             // reads its files cannot produce a path Traefik can open.
             let path_known =
@@ -270,13 +273,15 @@ async fn prepare_network(
             network: settings.network.clone(),
         });
     }
+    let containers = runtime.containers().await?;
     match settings
         .traefik
         .as_ref()
         .and_then(|t| t.container.as_deref())
     {
         Some(container) => {
-            match setup::attach_traefik(runtime, container, &settings.network).await {
+            match setup::attach_traefik_in(runtime, &containers, container, &settings.network).await
+            {
                 Ok(true) => report.actions.push(Action::AttachedTraefik {
                     container: container.to_string(),
                 }),
@@ -285,12 +290,14 @@ async fn prepare_network(
             }
         }
         None => report.warnings.push(
-            "Traefik does not run in a container, so it cannot reach projects by network alias; \
+            "Traefik does not run in a container, so it cannot reach projects by container name; \
              use host-port routes"
                 .to_string(),
         ),
     }
-    runtime.containers().await
+    // Attaching Traefik changes only Traefik's own entry, which the callers
+    // do not read, so the list is still good.
+    Ok(containers)
 }
 
 #[cfg(test)]
@@ -540,11 +547,11 @@ mod tests {
             std::fs::read_to_string(store.managed_dynamic_dir().join("zevo-shop.yml")).unwrap();
         assert!(file.contains("tls: {}"), "{file}");
         assert!(
-            file.contains("certFile: /etc/traefik/dynamic/zevo-certs/shop.pem"),
+            file.contains("certFile: /etc/traefik/dynamic/zevo-certs/shop.cert.pem"),
             "{file}"
         );
         assert!(
-            file.contains("keyFile: /etc/traefik/dynamic/zevo-certs/shop-key.pem"),
+            file.contains("keyFile: /etc/traefik/dynamic/zevo-certs/shop.key.pem"),
             "{file}"
         );
 

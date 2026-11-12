@@ -140,12 +140,13 @@ fn inspect(c: &ContainerInfo) -> Candidate {
             .entrypoints
             .iter()
             .find(|(n, _)| n.eq_ignore_ascii_case(to))
-            // `to` may be a port (":8443") instead of a name.
+            // `to` may be a port (":8443") instead of a name: the entrypoint
+            // listening on that port, or published to the host on it.
             .or_else(|| {
-                config
-                    .entrypoints
-                    .iter()
-                    .find(|(_, port)| to.starts_with(':') && *port == 443)
+                let wanted: u16 = to.strip_prefix(':')?.parse().ok()?;
+                config.entrypoints.iter().find(|(_, port)| {
+                    *port == wanted || c.published_ports.get(port) == Some(&wanted)
+                })
             })
     {
         entry = Some(target);
@@ -526,6 +527,16 @@ pub(crate) async fn attach_traefik(
     network: &str,
 ) -> Result<bool> {
     let containers = runtime.containers().await?;
+    attach_traefik_in(runtime, &containers, container, network).await
+}
+
+/// [`attach_traefik`] against a container list the caller already has.
+pub(crate) async fn attach_traefik_in(
+    runtime: &dyn Runtime,
+    containers: &[ContainerInfo],
+    container: &str,
+    network: &str,
+) -> Result<bool> {
     let Some(info) = containers.iter().find(|c| c.name == container) else {
         return Err(Error::Runtime(format!(
             "Traefik container '{container}' not found"
@@ -686,6 +697,26 @@ providers:
         assert!(settings.traefik.unwrap().tls);
         // No second network was created for it.
         assert_eq!(rt.networks(), ["proxy"]);
+    }
+
+    #[test]
+    fn follows_a_redirect_given_as_a_port() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("dynamic")).unwrap();
+        let mut c = traefik(
+            &[
+                "traefik",
+                "--providers.file.directory=/etc/traefik/dynamic",
+                "--entrypoints.web.address=:80",
+                "--entrypoints.web.http.redirections.entrypoint.to=:8443",
+                "--entrypoints.secure.address=:8443",
+            ],
+            tmp.path(),
+        );
+        c.published_ports = [(80, 80), (8443, 8443)].into();
+        let found = inspect(&c);
+        assert_eq!(found.entrypoint.as_deref(), Some("secure"));
+        assert_eq!((found.http_port, found.tls), (Some(8443), true));
     }
 
     #[tokio::test]

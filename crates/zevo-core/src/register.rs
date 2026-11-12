@@ -140,12 +140,38 @@ fn validate(store: &Store, project: &Project) -> Result<()> {
         if route.port == 0 {
             return Err(Error::Other("a route's port cannot be 0".into()));
         }
-        if let Some(prefix) = &route.path_prefix
-            && !prefix.starts_with('/')
-        {
-            return Err(Error::Other(format!(
-                "path prefix '{prefix}' must start with '/'"
-            )));
+        // These values are written into Traefik rules and URLs, so only
+        // characters that cannot change their meaning are allowed.
+        if let Some(prefix) = &route.path_prefix {
+            let plain = prefix.bytes().all(|b| {
+                b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'_' | b'.' | b'~' | b'%')
+            });
+            if !prefix.starts_with('/') || !plain {
+                return Err(Error::Other(format!(
+                    "path prefix '{prefix}' must start with '/' and use only letters, digits and / - _ . ~ %"
+                )));
+            }
+        }
+        if let Some(host) = &route.host {
+            let ok = !host.is_empty()
+                && host.len() <= 253
+                && host
+                    .split('.')
+                    .all(|label| validate_slug(&label.to_lowercase()).is_ok());
+            if !ok {
+                return Err(Error::Other(format!("'{host}' is not a valid hostname")));
+            }
+        }
+        if let Target::HostPort { address } = &route.target {
+            let ok = !address.is_empty()
+                && address.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']')
+                });
+            if !ok {
+                return Err(Error::Other(format!(
+                    "'{address}' is not a valid address (use a hostname or IP address)"
+                )));
+            }
         }
         let key = (
             route.hostname(&project.slug, &settings.domain_suffix),
@@ -297,6 +323,38 @@ mod tests {
         assert!(!freed.declared);
         assert_eq!(freed.routes.len(), 2);
         assert!(ensure_routes_editable(&freed).is_ok());
+    }
+
+    #[test]
+    fn rejects_values_that_could_alter_a_traefik_rule() {
+        let (tmp, store) = set_up();
+        let dir = folder(
+            tmp.path(),
+            "shop",
+            r#"{"image":"node","forwardPorts":[3000]}"#,
+        );
+        let base = draft(&dir).unwrap();
+
+        let mut p = base.clone();
+        p.routes[0].path_prefix = Some("/x`) || Host(`bank.localhost".into());
+        assert!(add(&store, &p).is_err());
+
+        let mut p = base.clone();
+        p.routes[0].host = Some("a.localhost`) || Host(`b".into());
+        assert!(add(&store, &p).is_err());
+
+        let mut p = base.clone();
+        p.routes[0].target = Target::HostPort {
+            address: "evil/../x y".into(),
+        };
+        assert!(add(&store, &p).is_err());
+
+        let mut p = base;
+        p.routes[0].path_prefix = Some("/api/v1.2".into());
+        p.routes[0].target = Target::HostPort {
+            address: "host.docker.internal".into(),
+        };
+        add(&store, &p).unwrap();
     }
 
     #[test]

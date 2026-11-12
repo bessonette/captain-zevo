@@ -22,7 +22,19 @@ pub struct DockerRuntime {
     docker: Docker,
 }
 
+const MANAGED_LABEL: &str = "dev.captain-zevo.managed";
+
 impl DockerRuntime {
+    async fn remove_forced(&self, container: &str) -> Result<()> {
+        let options = bollard::query_parameters::RemoveContainerOptionsBuilder::default()
+            .force(true)
+            .build();
+        self.docker
+            .remove_container(container, Some(options))
+            .await
+            .map_err(err)
+    }
+
     /// Connects using `DOCKER_HOST` if set. Otherwise uses the first socket
     /// that accepts a connection: the standard one, then the per-user sockets
     /// of Docker Desktop, OrbStack, Colima, Rancher Desktop and rootless
@@ -226,6 +238,28 @@ impl Runtime for DockerRuntime {
             .await
             .map_err(err)?;
 
+        // A leftover container of ours (stopped, or from a failed start)
+        // would block the name; anything else with that name is not ours to
+        // remove.
+        match self.docker.inspect_container(&spec.container, None).await {
+            Ok(existing) => {
+                let ours = existing
+                    .config
+                    .and_then(|c| c.labels)
+                    .is_some_and(|labels| labels.contains_key(MANAGED_LABEL));
+                if !ours {
+                    return Err(Error::Runtime(format!(
+                        "a container named '{}' already exists and was not created by Zevo; \
+                         remove or rename it first",
+                        spec.container
+                    )));
+                }
+                self.remove_forced(&spec.container).await?;
+            }
+            Err(e) if is_status(&e, 404) => {}
+            Err(e) => return Err(err(e)),
+        }
+
         let dynamic_dir = spec.dynamic_dir.to_string_lossy();
         // (container port, host port)
         let mut ports = vec![(80u16, spec.http_port)];
@@ -234,7 +268,7 @@ impl Runtime for DockerRuntime {
             image: Some(spec.image.clone()),
             cmd: Some(spec.args()),
             labels: Some(HashMap::from([(
-                "dev.captain-zevo.managed".to_string(),
+                MANAGED_LABEL.to_string(),
                 "true".to_string(),
             )])),
             exposed_ports: Some(
@@ -280,9 +314,11 @@ impl Runtime for DockerRuntime {
             .create_container(Some(options), body)
             .await
             .map_err(err)?;
-        self.docker
-            .start_container(&spec.container, None)
-            .await
-            .map_err(err)
+        if let Err(e) = self.docker.start_container(&spec.container, None).await {
+            // Typically the port is taken. Do not leave the container behind.
+            let _ = self.remove_forced(&spec.container).await;
+            return Err(err(e));
+        }
+        Ok(())
     }
 }

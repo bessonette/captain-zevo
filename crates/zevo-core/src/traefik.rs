@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{ErrorKind, Write};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -115,13 +115,16 @@ fn route_names(project: &Project) -> Vec<String> {
     let mut names = Vec::with_capacity(project.routes.len());
     for route in &project.routes {
         let base = match &route.subdomain {
-            Some(sub) => format!("{FILE_PREFIX}{}-{sub}", project.slug),
+            // `_` cannot appear in a slug or subdomain, so `shop` + `api`
+            // never collides with the project `shop-api`. Traefik merges
+            // every file into one namespace.
+            Some(sub) => format!("{FILE_PREFIX}{}_{sub}", project.slug),
             None => format!("{FILE_PREFIX}{}", project.slug),
         };
         let mut name = base.clone();
         let mut n = 2;
         while used.contains(&name) {
-            name = format!("{base}-{n}");
+            name = format!("{base}_{n}");
             n += 1;
         }
         used.insert(name.clone());
@@ -288,30 +291,7 @@ pub fn write_project_for(
         }
     }
 
-    // The temp name does not end in .yml/.yaml/.toml, so Traefik ignores it.
-    let tmp = dir.join(format!(
-        ".{}.{}.tmp",
-        file_name(&project.slug),
-        std::process::id()
-    ));
-    let result = (|| {
-        let mut f = fs::File::create(&tmp)
-            .map_err(|e| Error::io(format!("creating {}", tmp.display()), e))?;
-        f.write_all(content.as_bytes())
-            .and_then(|()| f.sync_all())
-            .map_err(|e| Error::io(format!("writing {}", tmp.display()), e))?;
-        drop(f);
-        fs::rename(&tmp, &path).map_err(|e| {
-            Error::io(
-                format!("renaming {} to {}", tmp.display(), path.display()),
-                e,
-            )
-        })
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result?;
+    crate::store::atomic_write(&path, content.as_bytes())?;
     tracing::debug!(path = %path.display(), "wrote Traefik config");
     Ok(true)
 }
@@ -621,35 +601,35 @@ http:
       entryPoints:
       - web
       service: zevo-shop
-    zevo-shop-api:
+    zevo-shop_api:
       rule: Host(`api.shop.localhost`)
       entryPoints:
       - web
-      service: zevo-shop-api
-    zevo-shop-api-2:
+      service: zevo-shop_api
+    zevo-shop_api_2:
       rule: Host(`api.shop.localhost`) && PathPrefix(`/v2`)
       entryPoints:
       - web
-      service: zevo-shop-api-2
-    zevo-shop-db:
+      service: zevo-shop_api_2
+    zevo-shop_db:
       rule: Host(`db.shop.localhost`)
       entryPoints:
       - web
-      service: zevo-shop-db
+      service: zevo-shop_db
   services:
     zevo-shop:
       loadBalancer:
         servers:
         - url: http://shop:3000
-    zevo-shop-api:
+    zevo-shop_api:
       loadBalancer:
         servers:
         - url: http://shop:8080
-    zevo-shop-api-2:
+    zevo-shop_api_2:
       loadBalancer:
         servers:
         - url: http://shop:8081
-    zevo-shop-db:
+    zevo-shop_db:
       loadBalancer:
         servers:
         - url: http://192.168.1.20:5050
@@ -694,29 +674,39 @@ http:
       - websecure
       tls: {{}}
       service: zevo-shop
-    zevo-shop-vite:
+    zevo-shop_vite:
       rule: Host(`vite.shop.localhost`)
       entryPoints:
       - websecure
       tls: {{}}
-      service: zevo-shop-vite
+      service: zevo-shop_vite
   services:
     zevo-shop:
       loadBalancer:
         servers:
         - url: http://vsc-shop-1:3000
-    zevo-shop-vite:
+    zevo-shop_vite:
       loadBalancer:
-        serversTransport: zevo-shop-vite
+        serversTransport: zevo-shop_vite
         servers:
         - url: https://vsc-shop-1:5173
   serversTransports:
-    zevo-shop-vite:
+    zevo-shop_vite:
       serverName: vite.shop.localhost
       insecureSkipVerify: true
 "
             )
         );
+    }
+
+    #[test]
+    fn names_do_not_collide_across_projects() {
+        let s = settings(Path::new("/x"));
+        let with_sub = render(&project("shop", vec![route(Some("api"), 1)]), &s).unwrap();
+        let other = render(&project("shop-api", vec![route(None, 2)]), &s).unwrap();
+        assert!(with_sub.contains("    zevo-shop_api:"), "{with_sub}");
+        assert!(other.contains("    zevo-shop-api:"), "{other}");
+        assert!(!with_sub.contains("zevo-shop-api:"));
     }
 
     #[test]

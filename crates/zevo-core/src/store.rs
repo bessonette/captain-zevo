@@ -145,7 +145,10 @@ pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(dir).map_err(|e| Error::io(format!("creating {}", dir.display()), e))?;
     let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    // Unique per call: two writers in one process must not share a temp file.
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!(".{name}.{}.{n}.tmp", std::process::id()));
     let result = (|| {
         let mut file = fs::File::create(&tmp)?;
         file.write_all(contents)?;
