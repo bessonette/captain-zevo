@@ -223,6 +223,35 @@ fn mono(text: impl Into<SharedString>, cx: &App) -> Div {
         .child(text.into())
 }
 
+/// Monospace text that opens `url` in the browser when clicked. The click
+/// does not also trigger whatever the text sits in (such as a table row).
+fn link(id: impl Into<SharedString>, label: impl Into<SharedString>, url: String, cx: &App) -> Div {
+    h_flex().child(
+        mono(label, cx)
+            .id(ElementId::Name(id.into()))
+            .cursor_pointer()
+            .text_color(cx.theme().link)
+            .hover(|style| style.underline())
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                cx.open_url(&url);
+            }),
+    )
+}
+
+/// The address of a hostname served by the Traefik that Zevo uses.
+fn address_url(snapshot: &Snapshot, host: &str) -> String {
+    let (tls, port) = match &snapshot.settings.traefik {
+        Some(t) => (t.tls, t.http_port),
+        None => (false, 80),
+    };
+    let scheme = if tls { "https" } else { "http" };
+    match (tls, port) {
+        (true, 443) | (false, 80) => format!("{scheme}://{host}"),
+        _ => format!("{scheme}://{host}:{port}"),
+    }
+}
+
 /// A label and its value on one line.
 fn field(label: &'static str, value: impl IntoElement, cx: &App) -> Div {
     h_flex()
@@ -481,18 +510,23 @@ impl Shell {
                 } else {
                     v_flex()
                         .gap_0p5()
-                        .children(view.project.routes.iter().map(|r| {
+                        .children(view.project.routes.iter().enumerate().map(|(route_ix, r)| {
                             let host =
                                 r.hostname(&view.project.slug, &snapshot.settings.domain_suffix);
+                            let url = view
+                                .status
+                                .urls
+                                .get(route_ix)
+                                .cloned()
+                                .unwrap_or_else(|| address_url(snapshot, &host));
                             h_flex()
                                 .gap_2()
-                                .child(
-                                    mono(
-                                        format!("{host}{}", r.path_prefix.as_deref().unwrap_or("")),
-                                        cx,
-                                    )
-                                    .text_color(cx.theme().link),
-                                )
+                                .child(link(
+                                    format!("list-{}-{route_ix}", view.project.slug),
+                                    format!("{host}{}", r.path_prefix.as_deref().unwrap_or("")),
+                                    url,
+                                    cx,
+                                ))
                                 .child(
                                     mono(format!("→ {}", r.port), cx)
                                         .text_color(cx.theme().muted_foreground),
@@ -740,10 +774,16 @@ impl Shell {
                         .gap_3()
                         .border_b_1()
                         .border_color(cx.theme().border.opacity(0.6))
-                        .child(
-                            mono(r.hostname(&p.slug, &snapshot.settings.domain_suffix), cx)
-                                .flex_1(),
-                        )
+                        .child(div().flex_1().child({
+                            let host = r.hostname(&p.slug, &snapshot.settings.domain_suffix);
+                            let url = view
+                                .status
+                                .urls
+                                .get(ix)
+                                .cloned()
+                                .unwrap_or_else(|| address_url(snapshot, &host));
+                            link(format!("route-{ix}"), host, url, cx)
+                        }))
                         .child(div().flex_1().child({
                             let to = match &r.target {
                                 Target::Container => "Container (shared network)".to_string(),
@@ -957,7 +997,16 @@ impl Shell {
                     .gap_3()
                     .border_b_1()
                     .border_color(cx.theme().border.opacity(0.6))
-                    .child(mono(r.hostnames.join(", "), cx).flex_1())
+                    .child(v_flex().flex_1().gap_0p5().children(
+                        r.hostnames.iter().enumerate().map(|(host_ix, host)| {
+                            link(
+                                format!("router-{ix}-{host_ix}"),
+                                host.clone(),
+                                address_url(snapshot, host),
+                                cx,
+                            )
+                        }),
+                    ))
                     .child(owner.w(px(200.)))
                     .child(
                         mono(
