@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{Host, Project};
-use crate::{Error, Result, devcontainer, programs};
+use crate::{Error, Result, devcontainer, programs, remote};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -88,12 +88,37 @@ pub fn devcontainer_uri(host_folder: &Path, workspace_folder: &str) -> String {
     format!("vscode-remote://dev-container+{hex}{workspace_folder}")
 }
 
+/// The same for a project on another machine: VS Code connects to the host
+/// over SSH first, then attaches to the devcontainer there.
+pub fn remote_devcontainer_uri(ssh: &str, host_folder: &Path, workspace_folder: &str) -> String {
+    let hex: String = host_folder
+        .to_string_lossy()
+        .bytes()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("vscode-remote://dev-container+{hex}@ssh-remote+{ssh}{workspace_folder}")
+}
+
 /// Folder the project is mounted at inside its container: the configured
-/// `workspaceFolder`, or the devcontainer default.
-fn workspace_folder(project: &Project) -> String {
-    let configured = devcontainer::detect(&project.path)
-        .ok()
-        .and_then(|d| d.workspace_folder);
+/// `workspaceFolder`, or the devcontainer default. For a project on another
+/// machine the configuration is read over SSH.
+fn workspace_folder(project: &Project, host: Option<&Host>) -> String {
+    let configured = match host {
+        None => devcontainer::detect(&project.path)
+            .ok()
+            .and_then(|d| d.workspace_folder),
+        Some(host) => {
+            let folder = project.path.to_string_lossy();
+            [".devcontainer/devcontainer.json", ".devcontainer.json"]
+                .into_iter()
+                .find_map(|candidate| {
+                    let config = format!("{folder}/{candidate}");
+                    let text = remote::read_file(host, &config).ok().flatten()?;
+                    devcontainer::detect_text(Path::new(&config), &text).ok()
+                })
+                .and_then(|d| d.workspace_folder)
+        }
+    };
     configured.unwrap_or_else(|| {
         let name = project
             .path
@@ -106,29 +131,34 @@ fn workspace_folder(project: &Project) -> String {
 /// Arguments that open the project in the editor. `host` is the remote
 /// machine the project lives on, if it is not this one.
 pub fn arguments(editor: Editor, project: &Project, host: Option<&Host>) -> Vec<String> {
-    let path = project.path.to_string_lossy();
-    if let Some(host) = host {
-        // Open the folder over SSH; the editor then offers to reopen it in
-        // its container.
-        return if editor.attaches_to_devcontainers() {
-            vec![
-                "--folder-uri".to_string(),
-                format!("vscode-remote://ssh-remote+{}{path}", host.ssh),
-            ]
-        } else {
-            vec![format!("ssh://{}{path}", host.ssh)]
-        };
-    }
     let has_devcontainer = project.kind != crate::model::DevcontainerKind::None;
-    if editor.attaches_to_devcontainers() && has_devcontainer {
-        vec![
-            "--folder-uri".to_string(),
-            devcontainer_uri(&project.path, &workspace_folder(project)),
-        ]
-    } else {
+    let workspace = (editor.attaches_to_devcontainers() && has_devcontainer)
+        .then(|| workspace_folder(project, host));
+    arguments_for(editor, project, host, workspace.as_deref())
+}
+
+/// [`arguments`], given the folder inside the container (`None` opens the
+/// plain folder).
+fn arguments_for(
+    editor: Editor,
+    project: &Project,
+    host: Option<&Host>,
+    workspace: Option<&str>,
+) -> Vec<String> {
+    let path = project.path.to_string_lossy();
+    let uri = match (host, workspace) {
+        (Some(host), Some(workspace)) => {
+            remote_devcontainer_uri(&host.ssh, &project.path, workspace)
+        }
+        (None, Some(workspace)) => devcontainer_uri(&project.path, workspace),
+        (Some(host), None) if editor.attaches_to_devcontainers() => {
+            format!("vscode-remote://ssh-remote+{}{path}", host.ssh)
+        }
         // Zed opens the folder and offers to reopen it in the container.
-        vec![path.into_owned()]
-    }
+        (Some(host), None) => return vec![format!("ssh://{}{path}", host.ssh)],
+        (None, None) => return vec![path.into_owned()],
+    };
+    vec!["--folder-uri".to_string(), uri]
 }
 
 /// Starts the editor on the project and returns without waiting for it.
@@ -180,15 +210,24 @@ mod tests {
     fn remote_projects_open_over_ssh() {
         let host = Host::from_ssh("dev@10.0.0.5", Some("buildbox"), None).unwrap();
         let p = project(Path::new("/srv/billing"), DevcontainerKind::Compose);
+        // Attached to the devcontainer on that machine.
         assert_eq!(
-            arguments(Editor::VsCode, &p, Some(&host)),
+            arguments_for(Editor::VsCode, &p, Some(&host), Some("/workspaces/billing")),
+            [
+                "--folder-uri",
+                "vscode-remote://dev-container+2f7372762f62696c6c696e67@ssh-remote+dev@10.0.0.5/workspaces/billing"
+            ]
+        );
+        // No devcontainer: the folder over SSH.
+        assert_eq!(
+            arguments_for(Editor::VsCode, &p, Some(&host), None),
             [
                 "--folder-uri",
                 "vscode-remote://ssh-remote+dev@10.0.0.5/srv/billing"
             ]
         );
         assert_eq!(
-            arguments(Editor::Zed, &p, Some(&host)),
+            arguments_for(Editor::Zed, &p, Some(&host), None),
             ["ssh://dev@10.0.0.5/srv/billing"]
         );
     }
