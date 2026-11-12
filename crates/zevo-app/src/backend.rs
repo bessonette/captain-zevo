@@ -268,6 +268,7 @@ impl Default for DemoBackend {
                        tags: &[&str]| Project {
             declared: false,
             address: None,
+            env_file: None,
             slug: slug.into(),
             name: name.into(),
             host: host.into(),
@@ -475,6 +476,7 @@ impl Backend for DemoBackend {
         Ok(Project {
             declared: false,
             address: None,
+            env_file: None,
             slug: zevo_core::model::slugify(name),
             name: name.to_string(),
             host: LOCAL_HOST_ID.into(),

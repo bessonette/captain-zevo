@@ -512,6 +512,7 @@ fn print_actions_only(report: &Report) {
                 println!("attached {slug} ({container})")
             }
             Action::IssuedCertificate { slug } => println!("created HTTPS certificate for {slug}"),
+            Action::WroteEnvFile { slug } => println!("wrote env file for {slug}"),
         }
     }
 }

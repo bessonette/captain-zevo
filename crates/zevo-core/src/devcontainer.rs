@@ -37,6 +37,8 @@ pub struct Declared {
     /// Suggested short name; the user may pick another when adding.
     pub slug: Option<String>,
     pub routes: Vec<Route>,
+    /// Where the project wants its addresses written as an env file.
+    pub env_file: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -46,6 +48,7 @@ struct RawDeclared {
     slug: Option<String>,
     #[serde(default)]
     routes: Vec<RawRoute>,
+    env_file: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -111,10 +114,14 @@ fn parse_declared(value: &Json) -> std::result::Result<Declared, String> {
             routes.push(route(Some(sub), None));
         }
     }
+    if let Some(path) = &raw.env_file {
+        crate::envfile::validate_path(path)?;
+    }
     Ok(Declared {
         name: raw.name,
         slug: raw.slug,
         routes,
+        env_file: raw.env_file,
     })
 }
 

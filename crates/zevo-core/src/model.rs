@@ -181,6 +181,10 @@ pub struct Project {
     /// machine, or a port forwarded to this one). Applies to declared routes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<String>,
+    /// File, relative to the project folder, where Zevo writes the project's
+    /// addresses as environment variables. Set by the project's declaration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_file: Option<String>,
 }
 
 fn default_host() -> String {

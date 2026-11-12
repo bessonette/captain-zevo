@@ -4,6 +4,7 @@
 pub mod certs;
 pub mod devcontainer;
 pub mod doctor;
+pub mod envfile;
 pub mod error;
 pub mod health;
 pub mod model;

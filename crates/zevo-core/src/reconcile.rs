@@ -9,7 +9,7 @@ use crate::health::{self, Listening};
 use crate::model::{LOCAL_HOST_ID, Project, Settings, Target};
 use crate::runtime::{ContainerInfo, Runtime};
 use crate::store::Store;
-use crate::{Error, Result, certs, register, setup, traefik};
+use crate::{Error, Result, certs, envfile, register, setup, traefik};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
@@ -20,6 +20,7 @@ pub enum Action {
     AttachedTraefik { container: String },
     AttachedProject { slug: String, container: String },
     IssuedCertificate { slug: String },
+    WroteEnvFile { slug: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -259,6 +260,15 @@ pub async fn reconcile_with(
             Ok(false) => {}
             Err(e) => report.warnings.push(format!("{}: {e}", project.slug)),
         }
+        if project.host == LOCAL_HOST_ID {
+            match envfile::write(project, &settings) {
+                Ok(true) => report.actions.push(Action::WroteEnvFile {
+                    slug: project.slug.clone(),
+                }),
+                Ok(false) => {}
+                Err(e) => report.warnings.push(format!("{}: {e}", project.slug)),
+            }
+        }
         report.projects.push(status);
     }
 
@@ -326,6 +336,7 @@ mod tests {
         Project {
             declared: false,
             address: None,
+            env_file: None,
             slug: slug.into(),
             name: slug.into(),
             host: LOCAL_HOST_ID.into(),

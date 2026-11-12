@@ -170,6 +170,7 @@ mod tests {
         Project {
             declared: false,
             address: None,
+            env_file: None,
             slug: slug.into(),
             name: slug.into(),
             host: "local".into(),

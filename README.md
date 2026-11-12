@@ -106,6 +106,12 @@ adds it gets the same addresses with nothing to type:
 - Zevo re-reads the block on every reconcile, so editing the file updates the
   routes. Declared routes cannot be edited in Zevo; remove the block to manage
   them in Zevo instead.
+- `"envFile": ".devcontainer/zevo.env"` asks Zevo to write the project's
+  addresses there as environment variables (`ZEVO_DOMAIN`, `ZEVO_URL`,
+  `ZEVO_HOST_API`, `ZEVO_URL_API`, ...), so the app can read its own hostnames
+  for allowed-host lists, CORS and absolute URLs. They differ per checkout,
+  so add the file to `.gitignore`. Zevo writes nothing into a project that
+  does not ask, and never overwrites a file it did not write.
 - Where the app runs is a fact about your machine, not the repository:
   `zevo add <folder> --address host.docker.internal` points every declared
   route at that address instead of the container.

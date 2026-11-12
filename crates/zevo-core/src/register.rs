@@ -36,6 +36,7 @@ pub fn draft(folder: &Path) -> Result<Project> {
             tags: Vec::new(),
             declared: true,
             address: None,
+            env_file: declared.env_file,
         });
     }
 
@@ -63,6 +64,7 @@ pub fn draft(folder: &Path) -> Result<Project> {
         tags: Vec::new(),
         declared: false,
         address: None,
+        env_file: None,
     })
 }
 
@@ -89,11 +91,15 @@ pub fn sync_declared(store: &Store, project: &Project) -> Result<Option<Project>
     let mut updated = project.clone();
     match devcontainer::detect(&project.path)?.declared {
         Some(declared) => {
+            updated.env_file = declared.env_file;
             updated.routes = declared.routes;
             apply_address(&mut updated);
         }
         // The block was removed: keep the routes, now editable in Zevo.
-        None => updated.declared = false,
+        None => {
+            updated.declared = false;
+            updated.env_file = None;
+        }
     }
     if updated == *project {
         return Ok(None);

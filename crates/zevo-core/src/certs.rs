@@ -288,6 +288,7 @@ mod tests {
             tags: vec![],
             declared: false,
             address: None,
+            env_file: None,
         }
     }
 
