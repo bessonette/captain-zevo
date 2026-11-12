@@ -3,17 +3,21 @@
 //!
 //! Methods block; call them from a background task, never the UI thread.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use zevo_core::certs::{self, Issuer as _};
 use zevo_core::health::Listening;
 use zevo_core::ide::{self, Editor};
 use zevo_core::model::{
-    DevcontainerKind, LOCAL_HOST_ID, Project, Route, Settings, Target, TraefikMode, TraefikSettings,
+    DevcontainerKind, Host, LOCAL_HOST_ID, Project, Route, Settings, Target, TraefikMode,
+    TraefikSettings,
 };
 use zevo_core::reconcile::{self, ContainerState, Discovered, ProjectStatus};
 use zevo_core::register;
+use zevo_core::remote;
 use zevo_core::runtime::{DockerRuntime, Runtime};
 use zevo_core::setup::{self, Candidate};
 use zevo_core::store::Store;
@@ -42,6 +46,16 @@ pub struct Snapshot {
     pub discovered: Vec<Discovered>,
     /// Editors installed on this machine.
     pub editors: Vec<Editor>,
+    /// Remote hosts and whether Docker answers on each.
+    pub hosts: Vec<HostView>,
+}
+
+/// A remote host with its connection status.
+#[derive(Debug, Clone)]
+pub struct HostView {
+    pub host: Host,
+    /// Runtime name and version there, or why it cannot be reached.
+    pub status: Result<String, String>,
 }
 
 impl Snapshot {
@@ -65,6 +79,7 @@ impl Default for Snapshot {
             warnings: Vec::new(),
             discovered: Vec::new(),
             editors: Vec::new(),
+            hosts: Vec::new(),
         }
     }
 }
@@ -79,8 +94,12 @@ pub trait Backend: Send + Sync + 'static {
     /// Reconciles, then reports the resulting state.
     fn load(&self) -> Result<Snapshot, String>;
     fn remove_project(&self, slug: &str) -> Result<(), String>;
-    /// Inspects a folder and proposes a project for it, without saving.
-    fn draft(&self, folder: &str) -> Result<Project, String>;
+    /// Inspects a folder on the given host (`local` for this machine) and
+    /// proposes a project for it, without saving.
+    fn draft(&self, host: &str, folder: &str) -> Result<Project, String>;
+    /// Registers a remote host after checking that Docker answers on it.
+    fn add_host(&self, ssh: &str, name: &str, address: &str) -> Result<(), String>;
+    fn remove_host(&self, id: &str) -> Result<(), String>;
     fn add_project(&self, project: &Project) -> Result<(), String>;
     /// Saves changes to an existing project.
     fn save_project(&self, project: &Project) -> Result<(), String>;
@@ -99,6 +118,44 @@ pub trait Backend: Send + Sync + 'static {
 pub struct SystemBackend {
     store: Store,
     tokio: tokio::runtime::Runtime,
+    /// SSH connections to remote hosts, kept open between loads.
+    links: Mutex<BTreeMap<String, Link>>,
+}
+
+/// The state of the connection to one remote host.
+enum Link {
+    Open(remote::Tunnel, DockerRuntime),
+    /// Failed at this time, for this reason. Retried after a pause, so an
+    /// unreachable machine does not stall every refresh on an SSH timeout.
+    Failed(Instant, String),
+}
+
+const RETRY_AFTER: Duration = Duration::from_secs(30);
+
+impl SystemBackend {
+    /// Brings the connections in line with the registered hosts: opens new
+    /// ones, reopens dead ones, and drops those for removed hosts.
+    fn refresh_links(links: &mut BTreeMap<String, Link>, hosts: &[Host]) {
+        links.retain(|id, _| hosts.iter().any(|h| &h.id == id));
+        for host in hosts {
+            let usable = match links.get_mut(&host.id) {
+                Some(Link::Open(tunnel, _)) => tunnel.alive(),
+                Some(Link::Failed(at, _)) => at.elapsed() < RETRY_AFTER,
+                None => false,
+            };
+            if usable {
+                continue;
+            }
+            let opened = remote::Tunnel::open(host).and_then(|tunnel| {
+                let runtime = tunnel.runtime()?;
+                Ok(Link::Open(tunnel, runtime))
+            });
+            links.insert(
+                host.id.clone(),
+                opened.unwrap_or_else(|e| Link::Failed(Instant::now(), e.to_string())),
+            );
+        }
+    }
 }
 
 impl SystemBackend {
@@ -110,6 +167,7 @@ impl SystemBackend {
                 .enable_all()
                 .build()
                 .map_err(|e| e.to_string())?,
+            links: Mutex::new(BTreeMap::new()),
         })
     }
 }
@@ -129,10 +187,36 @@ impl Backend for SystemBackend {
                 Err(e) => (None, Err(e)),
             };
 
+            // Loads never overlap (the UI runs one at a time), so the
+            // connections can be taken out for the length of this one.
+            let hosts = self.store.hosts().map_err(|e| e.to_string())?;
+            let mut links = std::mem::take(&mut *self.links.lock().unwrap());
+            Self::refresh_links(&mut links, &hosts);
+            let mut remotes = reconcile::RemoteRuntimes::new();
+            let mut host_views = Vec::new();
+            for host in &hosts {
+                let status = match links.get(&host.id) {
+                    Some(Link::Open(_, rt)) => {
+                        remotes.insert(host.id.clone(), Ok(rt as &dyn Runtime));
+                        rt.ping().await.map_err(|e| e.to_string())
+                    }
+                    Some(Link::Failed(_, reason)) => {
+                        remotes.insert(host.id.clone(), Err(reason.clone()));
+                        Err(reason.clone())
+                    }
+                    None => Err("not connected".to_string()),
+                };
+                host_views.push(HostView {
+                    host: host.clone(),
+                    status,
+                });
+            }
+
             let mut snapshot = Snapshot {
                 settings,
                 runtime,
                 editors: ide::available(),
+                hosts: host_views,
                 ..Snapshot::default()
             };
             let unknown = |p: &Project| ProjectStatus {
@@ -147,12 +231,22 @@ impl Backend for SystemBackend {
             let statuses = match &snapshot.settings.traefik {
                 None => projects.iter().map(unknown).collect(),
                 Some(traefik_settings) => {
-                    let report = reconcile::reconcile(
+                    let report = reconcile::reconcile_hosts(
                         &self.store,
                         docker.as_ref().map(|d| d as &dyn Runtime),
+                        &remotes,
+                        &certs::Mkcert,
                     )
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| e.to_string());
+                    let report = match report {
+                        Ok(report) => report,
+                        Err(e) => {
+                            drop(remotes);
+                            *self.links.lock().unwrap() = links;
+                            return Err(e);
+                        }
+                    };
                     // Reconciling may have re-read declared routes from disk.
                     projects = self.store.projects().map_err(|e| e.to_string())?;
                     snapshot.warnings = report.warnings;
@@ -171,11 +265,19 @@ impl Backend for SystemBackend {
                         .find(|s| s.slug == project.slug)
                         .cloned()
                         .unwrap_or_else(|| unknown(&project));
-                    let yaml = traefik::render_for(
-                        &project,
-                        &snapshot.settings,
-                        status.container.as_deref(),
-                    )
+                    let yaml = match hosts.iter().find(|h| h.id == project.host) {
+                        Some(host) => traefik::render_via_edge(
+                            &project,
+                            &snapshot.settings,
+                            &host.address,
+                            host.edge_port,
+                        ),
+                        None => traefik::render_for(
+                            &project,
+                            &snapshot.settings,
+                            status.container.as_deref(),
+                        ),
+                    }
                     .unwrap_or_default();
                     ProjectView {
                         project,
@@ -184,6 +286,8 @@ impl Backend for SystemBackend {
                     }
                 })
                 .collect();
+            drop(remotes);
+            *self.links.lock().unwrap() = links;
             Ok(snapshot)
         })
     }
@@ -192,8 +296,27 @@ impl Backend for SystemBackend {
         register::remove(&self.store, slug).map_err(|e| e.to_string())
     }
 
-    fn draft(&self, folder: &str) -> Result<Project, String> {
-        register::draft(Path::new(folder.trim())).map_err(|e| e.to_string())
+    fn draft(&self, host: &str, folder: &str) -> Result<Project, String> {
+        if host == LOCAL_HOST_ID {
+            return register::draft(Path::new(folder.trim())).map_err(|e| e.to_string());
+        }
+        let host = self.store.host(host).map_err(|e| e.to_string())?;
+        register::draft_remote(&host, folder).map_err(|e| e.to_string())
+    }
+
+    fn add_host(&self, ssh: &str, name: &str, address: &str) -> Result<(), String> {
+        let host = Host::from_ssh(ssh, Some(name), Some(address)).map_err(|e| e.to_string())?;
+        // Prove the connection before saving anything.
+        let tunnel = remote::Tunnel::open(&host).map_err(|e| e.to_string())?;
+        let runtime = tunnel.runtime().map_err(|e| e.to_string())?;
+        self.tokio
+            .block_on(runtime.ping())
+            .map_err(|e| e.to_string())?;
+        self.store.add_host(&host).map_err(|e| e.to_string())
+    }
+
+    fn remove_host(&self, id: &str) -> Result<(), String> {
+        self.store.remove_host(id).map_err(|e| e.to_string())
     }
 
     fn add_project(&self, project: &Project) -> Result<(), String> {
@@ -242,7 +365,11 @@ impl Backend for SystemBackend {
 
     fn open_in_editor(&self, slug: &str, editor: Editor) -> Result<(), String> {
         let project = self.store.project(slug).map_err(|e| e.to_string())?;
-        ide::open(editor, &project).map_err(|e| e.to_string())
+        let host = match project.host.as_str() {
+            LOCAL_HOST_ID => None,
+            id => Some(self.store.host(id).map_err(|e| e.to_string())?),
+        };
+        ide::open(editor, &project, host.as_ref()).map_err(|e| e.to_string())
     }
 
     fn set_editor(&self, editor: Editor) -> Result<(), String> {
@@ -259,6 +386,7 @@ pub struct DemoBackend {
     projects: Mutex<Vec<(Project, ContainerState, Option<&'static str>)>>,
     set_up: Mutex<bool>,
     editor: Mutex<Option<Editor>>,
+    hosts: Mutex<Vec<Host>>,
 }
 
 impl DemoBackend {
@@ -407,6 +535,9 @@ impl Default for DemoBackend {
             ]),
             set_up: Mutex::new(true),
             editor: Mutex::new(None),
+            hosts: Mutex::new(vec![
+                Host::from_ssh("dev@192.168.1.20", Some("buildbox"), None).unwrap(),
+            ]),
         }
     }
 }
@@ -428,7 +559,6 @@ impl Backend for DemoBackend {
             ..Settings::default()
         };
         let projects = self.projects.lock().unwrap();
-        let has_billing = projects.iter().any(|(p, _, _)| p.slug == "billing");
         let mut routers = Vec::new();
         let views = projects
             .iter()
@@ -489,14 +619,22 @@ impl Backend for DemoBackend {
             discovered: if set_up {
                 vec![
                     Discovered {
+                        host: LOCAL_HOST_ID.into(),
                         folder: "/home/dev/code/inventory".into(),
                         container: "vsc-inventory-a41".into(),
                         running: true,
                     },
                     Discovered {
+                        host: LOCAL_HOST_ID.into(),
                         folder: "/home/dev/code/old-prototype".into(),
                         container: "vsc-old-prototype-9c2".into(),
                         running: false,
+                    },
+                    Discovered {
+                        host: "buildbox".into(),
+                        folder: "/srv/dev/reports".into(),
+                        container: "vsc-reports-7d0".into(),
+                        running: true,
                     },
                 ]
                 .into_iter()
@@ -505,14 +643,17 @@ impl Backend for DemoBackend {
             } else {
                 Vec::new()
             },
-            warnings: if has_billing {
-                vec![
-                    "billing: on host 'buildbox', which is not managed yet; use host-port routes"
-                        .into(),
-                ]
-            } else {
-                Vec::new()
-            },
+            warnings: Vec::new(),
+            hosts: self
+                .hosts
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|host| HostView {
+                    host: host.clone(),
+                    status: Ok("Docker Engine 28.3 (example)".into()),
+                })
+                .collect(),
         })
     }
 
@@ -524,7 +665,33 @@ impl Backend for DemoBackend {
         Ok(())
     }
 
-    fn draft(&self, folder: &str) -> Result<Project, String> {
+    fn add_host(&self, ssh: &str, name: &str, address: &str) -> Result<(), String> {
+        let host = Host::from_ssh(ssh, Some(name), Some(address)).map_err(|e| e.to_string())?;
+        let mut hosts = self.hosts.lock().unwrap();
+        if hosts.iter().any(|h| h.id == host.id) {
+            return Err(format!("host '{}' is already registered", host.id));
+        }
+        hosts.push(host);
+        Ok(())
+    }
+
+    fn remove_host(&self, id: &str) -> Result<(), String> {
+        if self
+            .projects
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(p, _, _)| p.host == id)
+        {
+            return Err(format!(
+                "host '{id}' still has projects; remove those first"
+            ));
+        }
+        self.hosts.lock().unwrap().retain(|h| h.id != id);
+        Ok(())
+    }
+
+    fn draft(&self, host: &str, folder: &str) -> Result<Project, String> {
         let folder = folder.trim();
         if folder.is_empty() {
             return Err("enter a folder".into());
@@ -540,7 +707,7 @@ impl Backend for DemoBackend {
             env_file: None,
             slug: zevo_core::model::slugify(name),
             name: name.to_string(),
-            host: LOCAL_HOST_ID.into(),
+            host: host.to_string(),
             path: PathBuf::from(folder),
             kind: DevcontainerKind::Compose,
             service: Some("app".into()),

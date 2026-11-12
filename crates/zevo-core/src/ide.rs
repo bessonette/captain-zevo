@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::Project;
+use crate::model::{Host, Project};
 use crate::{Error, Result, devcontainer, programs};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,8 +103,22 @@ fn workspace_folder(project: &Project) -> String {
     })
 }
 
-/// Arguments that open the project in the editor.
-pub fn arguments(editor: Editor, project: &Project) -> Vec<String> {
+/// Arguments that open the project in the editor. `host` is the remote
+/// machine the project lives on, if it is not this one.
+pub fn arguments(editor: Editor, project: &Project, host: Option<&Host>) -> Vec<String> {
+    let path = project.path.to_string_lossy();
+    if let Some(host) = host {
+        // Open the folder over SSH; the editor then offers to reopen it in
+        // its container.
+        return if editor.attaches_to_devcontainers() {
+            vec![
+                "--folder-uri".to_string(),
+                format!("vscode-remote://ssh-remote+{}{path}", host.ssh),
+            ]
+        } else {
+            vec![format!("ssh://{}{path}", host.ssh)]
+        };
+    }
     let has_devcontainer = project.kind != crate::model::DevcontainerKind::None;
     if editor.attaches_to_devcontainers() && has_devcontainer {
         vec![
@@ -113,17 +127,17 @@ pub fn arguments(editor: Editor, project: &Project) -> Vec<String> {
         ]
     } else {
         // Zed opens the folder and offers to reopen it in the container.
-        vec![project.path.to_string_lossy().into_owned()]
+        vec![path.into_owned()]
     }
 }
 
 /// Starts the editor on the project and returns without waiting for it.
-pub fn open(editor: Editor, project: &Project) -> Result<()> {
+pub fn open(editor: Editor, project: &Project, host: Option<&Host>) -> Result<()> {
     let program = editor.program().ok_or_else(|| {
         Error::Other(format!("{} does not appear to be installed", editor.name()))
     })?;
     Command::new(&program)
-        .args(arguments(editor, project))
+        .args(arguments(editor, project, host))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -162,6 +176,23 @@ mod tests {
     }
 
     #[test]
+    fn remote_projects_open_over_ssh() {
+        let host = Host::from_ssh("dev@10.0.0.5", Some("buildbox"), None).unwrap();
+        let p = project(Path::new("/srv/billing"), DevcontainerKind::Compose);
+        assert_eq!(
+            arguments(Editor::VsCode, &p, Some(&host)),
+            [
+                "--folder-uri",
+                "vscode-remote://ssh-remote+dev@10.0.0.5/srv/billing"
+            ]
+        );
+        assert_eq!(
+            arguments(Editor::Zed, &p, Some(&host)),
+            ["ssh://dev@10.0.0.5/srv/billing"]
+        );
+    }
+
+    #[test]
     fn arguments_follow_the_editor_and_the_workspace_folder() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("shop");
@@ -174,7 +205,7 @@ mod tests {
             r#"{"image":"node"}"#,
         )
         .unwrap();
-        let args = arguments(Editor::VsCode, &p);
+        let args = arguments(Editor::VsCode, &p, None);
         assert_eq!(args[0], "--folder-uri");
         assert!(args[1].ends_with("/workspaces/shop"), "{}", args[1]);
 
@@ -183,12 +214,12 @@ mod tests {
             r#"{"image":"node","workspaceFolder":"/srv/app"}"#,
         )
         .unwrap();
-        assert!(arguments(Editor::Cursor, &p)[1].ends_with("/srv/app"));
+        assert!(arguments(Editor::Cursor, &p, None)[1].ends_with("/srv/app"));
 
         // Zed, and folders without a devcontainer, just open the folder.
-        assert_eq!(arguments(Editor::Zed, &p), [dir.to_string_lossy()]);
+        assert_eq!(arguments(Editor::Zed, &p, None), [dir.to_string_lossy()]);
         assert_eq!(
-            arguments(Editor::VsCode, &project(&dir, DevcontainerKind::None)),
+            arguments(Editor::VsCode, &project(&dir, DevcontainerKind::None), None),
             [dir.to_string_lossy()]
         );
     }

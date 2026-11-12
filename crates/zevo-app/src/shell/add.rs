@@ -20,6 +20,8 @@ struct RouteRow {
 
 /// State of the "Add project" page.
 pub(super) struct AddForm {
+    /// Host the folder is on; `local` for this machine.
+    host: String,
     folder: Entity<InputState>,
     /// Set once the folder has been inspected.
     draft: Option<Project>,
@@ -85,12 +87,14 @@ impl Shell {
     /// Opens the add page for a known folder and reads it straight away.
     pub(super) fn open_add_for(
         &mut self,
+        host: String,
         folder: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.open_add(window, cx);
-        if let Some(form) = &self.add {
+        if let Some(form) = &mut self.add {
+            form.host = host;
             form.folder
                 .update(cx, |input, cx| input.set_value(folder, window, cx));
         }
@@ -110,6 +114,7 @@ impl Shell {
             },
         );
         self.add = Some(AddForm {
+            host: zevo_core::model::LOCAL_HOST_ID.to_string(),
             folder,
             draft: None,
             name: text_input("Name", "", window, cx),
@@ -152,12 +157,13 @@ impl Shell {
     fn inspect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(form) = &mut self.add else { return };
         let folder = form.folder.read(cx).value().to_string();
+        let host = form.host.clone();
         form.busy = true;
         form.error = None;
         let backend = self.backend.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
-                .background_spawn(async move { backend.draft(&folder) })
+                .background_spawn(async move { backend.draft(&host, &folder) })
                 .await;
             _ = this.update_in(cx, |this, window, cx| {
                 let Some(form) = &mut this.add else { return };
@@ -247,7 +253,12 @@ impl Shell {
                         .tooltip("All projects")
                         .on_click(cx.listener(|this, _, _, cx| this.go(Page::Projects(None), cx))),
                 )
-                .child("Add project"),
+                .child(match self.add.as_ref().map(|f| f.host.as_str()) {
+                    Some(host) if host != zevo_core::model::LOCAL_HOST_ID => {
+                        format!("Add project on {host}")
+                    }
+                    _ => "Add project".to_string(),
+                }),
             div(),
             cx,
         );
@@ -264,11 +275,14 @@ impl Shell {
                 h_flex()
                     .gap_2()
                     .child(div().flex_1().child(Input::new(&form.folder)))
-                    .child(
-                        Button::new("browse")
-                            .label("Browse…")
-                            .on_click(cx.listener(|this, _, window, cx| this.browse(window, cx))),
-                    )
+                    // The folder picker only sees this machine.
+                    .when(form.host == zevo_core::model::LOCAL_HOST_ID, |row| {
+                        row.child(
+                            Button::new("browse")
+                                .label("Browse…")
+                                .on_click(cx.listener(|this, _, window, cx| this.browse(window, cx))),
+                        )
+                    })
                     .child(
                         Button::new("inspect")
                             .label(if form.draft.is_some() { "Read again" } else { "Continue" })
@@ -281,7 +295,7 @@ impl Shell {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("The project folder on this machine. Zevo reads its devcontainer settings and changes nothing in it."),
+                    .child(if form.host == zevo_core::model::LOCAL_HOST_ID { "The project folder on this machine. Zevo reads its devcontainer settings and changes nothing in it." } else { "The full path of the project folder on that machine. Zevo reads its devcontainer settings over SSH." }),
             );
 
         let details = form.draft.as_ref().map(|draft| {

@@ -138,13 +138,30 @@ pub fn detect(folder: &Path) -> Result<Detected> {
     };
     let text = std::fs::read_to_string(&config_path)
         .map_err(|e| Error::io(format!("reading {}", config_path.display()), e))?;
+    parse_config(folder, config_path, &text, true)
+}
+
+/// Like [`detect`], for a devcontainer.json whose text was fetched from
+/// somewhere else (another machine). Compose files are not read, so ports
+/// come from the devcontainer.json alone.
+pub fn detect_text(config_path: &Path, text: &str) -> Result<Detected> {
+    let folder = config_path.parent().unwrap_or(Path::new("/"));
+    parse_config(folder, config_path.to_path_buf(), text, false)
+}
+
+fn parse_config(
+    folder: &Path,
+    config_path: PathBuf,
+    text: &str,
+    read_compose: bool,
+) -> Result<Detected> {
     let config_err = |message: String| Error::Config {
         path: config_path.clone(),
         message,
     };
 
     let json: Json =
-        jsonc_parser::parse_to_serde_value(&text, &jsonc_parser::ParseOptions::default())
+        jsonc_parser::parse_to_serde_value(text, &jsonc_parser::ParseOptions::default())
             .map_err(|e| config_err(e.to_string()))?;
     let Json::Object(obj) = &json else {
         return Err(config_err("top-level value must be an object".into()));
@@ -214,7 +231,7 @@ pub fn detect(folder: &Path) -> Result<Detected> {
         }
     }
 
-    if kind == DevcontainerKind::Compose {
+    if read_compose && kind == DevcontainerKind::Compose {
         let base = config_path.parent().unwrap_or(folder);
         let files: Vec<&str> = match obj.get("dockerComposeFile") {
             Some(Json::String(s)) => vec![s.as_str()],

@@ -6,7 +6,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::health::{self, Listening};
-use crate::model::{LOCAL_HOST_ID, Project, Settings, Target};
+use crate::model::{Host, LOCAL_HOST_ID, Project, Settings, Target};
 use crate::runtime::{ContainerInfo, Runtime};
 use crate::store::Store;
 use crate::{Error, Result, certs, envfile, register, setup, traefik};
@@ -14,13 +14,36 @@ use crate::{Error, Result, certs, envfile, register, setup, traefik};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum Action {
-    WroteRoutes { slug: String },
-    RemovedOrphanRoutes { slug: String },
-    CreatedNetwork { network: String },
-    AttachedTraefik { container: String },
-    AttachedProject { slug: String, container: String },
-    IssuedCertificate { slug: String },
-    WroteEnvFile { slug: String },
+    WroteRoutes {
+        slug: String,
+    },
+    RemovedOrphanRoutes {
+        slug: String,
+    },
+    CreatedNetwork {
+        network: String,
+    },
+    AttachedTraefik {
+        container: String,
+    },
+    AttachedProject {
+        slug: String,
+        container: String,
+    },
+    /// Started the edge Traefik on a remote host.
+    StartedEdge {
+        host: String,
+    },
+    /// Wrote a project's routes into a remote host's edge Traefik.
+    WroteEdgeRoutes {
+        slug: String,
+    },
+    IssuedCertificate {
+        slug: String,
+    },
+    WroteEnvFile {
+        slug: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -58,6 +81,8 @@ pub struct Report {
 /// A devcontainer Zevo found but does not manage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Discovered {
+    /// Host id; `local` for this machine.
+    pub host: String,
     /// The project folder the container was created from.
     pub folder: std::path::PathBuf,
     pub container: String,
@@ -66,8 +91,12 @@ pub struct Discovered {
 
 /// Devcontainers whose folder no registered project uses, one per folder
 /// (a running container wins), sorted by folder.
-pub fn discover(containers: &[ContainerInfo], projects: &[Project]) -> Vec<Discovered> {
-    let registered: Vec<String> = projects.iter().map(|p| normalize(&p.path)).collect();
+pub fn discover(host: &str, containers: &[ContainerInfo], projects: &[Project]) -> Vec<Discovered> {
+    let registered: Vec<String> = projects
+        .iter()
+        .filter(|p| p.host == host)
+        .map(|p| normalize(&p.path))
+        .collect();
     let mut found: std::collections::BTreeMap<String, Discovered> = Default::default();
     for c in containers {
         let Some(folder) = c.labels.get("devcontainer.local_folder") else {
@@ -78,6 +107,7 @@ pub fn discover(containers: &[ContainerInfo], projects: &[Project]) -> Vec<Disco
             continue;
         }
         let candidate = Discovered {
+            host: host.to_string(),
             folder: folder.into(),
             container: c.name.clone(),
             running: c.running,
@@ -166,6 +196,32 @@ pub async fn reconcile_with(
     runtime: Option<&dyn Runtime>,
     issuer: &dyn certs::Issuer,
 ) -> Result<Report> {
+    reconcile_hosts(store, runtime, &RemoteRuntimes::new(), issuer).await
+}
+
+/// Connections to remote hosts by host id: a runtime, or why it could not be
+/// reached. Hosts missing from the map are treated as not connected.
+pub type RemoteRuntimes<'a> =
+    std::collections::BTreeMap<String, std::result::Result<&'a dyn Runtime, String>>;
+
+/// Name of the edge Traefik container and its routes volume on remote hosts.
+pub const EDGE_CONTAINER: &str = "zevo-edge";
+pub const EDGE_VOLUME: &str = "zevo-edge-routes";
+
+/// What is known about one remote host during a pass.
+struct RemoteHost<'a> {
+    host: Host,
+    runtime: &'a dyn Runtime,
+    containers: Vec<ContainerInfo>,
+}
+
+/// Reconciles local projects and projects on the given remote hosts.
+pub async fn reconcile_hosts(
+    store: &Store,
+    runtime: Option<&dyn Runtime>,
+    remotes: &RemoteRuntimes<'_>,
+    issuer: &dyn certs::Issuer,
+) -> Result<Report> {
     let settings = store.settings()?;
     let Some(traefik_settings) = &settings.traefik else {
         return Err(Error::NotSetUp);
@@ -200,8 +256,67 @@ pub async fn reconcile_with(
     };
 
     if let Some(containers) = &containers {
-        report.discovered = discover(containers, &projects);
+        report.discovered = discover(LOCAL_HOST_ID, containers, &projects);
     }
+    // Remote hosts: connect-level problems are reported once per host, and a
+    // host that is reachable gets its network and edge Traefik prepared.
+    let hosts = store.hosts()?;
+    let mut remote: std::collections::BTreeMap<String, RemoteHost> = Default::default();
+    for host in &hosts {
+        let rt = match remotes.get(&host.id) {
+            Some(Ok(rt)) => *rt,
+            Some(Err(e)) => {
+                report
+                    .warnings
+                    .push(format!("{}: cannot reach the host: {e}", host.name));
+                continue;
+            }
+            None => continue,
+        };
+        let needs_edge = projects
+            .iter()
+            .any(|p| p.host == host.id && p.routes.iter().any(|r| r.target == Target::Container));
+        if needs_edge {
+            let prepared = async {
+                rt.ensure_network(&settings.network).await?;
+                rt.ensure_edge(&crate::runtime::EdgeSpec {
+                    container: EDGE_CONTAINER.to_string(),
+                    image: setup::MANAGED_IMAGE.to_string(),
+                    network: settings.network.clone(),
+                    volume: EDGE_VOLUME.to_string(),
+                    port: host.edge_port,
+                })
+                .await
+            }
+            .await;
+            match prepared {
+                Ok(true) => report.actions.push(Action::StartedEdge {
+                    host: host.id.clone(),
+                }),
+                Ok(false) => {}
+                Err(e) => report.warnings.push(format!("{}: {e}", host.name)),
+            }
+        }
+        match rt.containers().await {
+            Ok(containers) => {
+                report
+                    .discovered
+                    .extend(discover(&host.id, &containers, &projects));
+                // Kept even without projects, so files a removed project
+                // left in the edge are cleaned up.
+                remote.insert(
+                    host.id.clone(),
+                    RemoteHost {
+                        host: host.clone(),
+                        runtime: rt,
+                        containers,
+                    },
+                );
+            }
+            Err(e) => report.warnings.push(format!("{}: {e}", host.name)),
+        }
+    }
+
     let mut issuer_ready: Option<std::result::Result<(), String>> = None;
     let mut uncertified: Option<String> = None;
     for project in &projects {
@@ -213,52 +328,58 @@ pub async fn reconcile_with(
             urls: urls(project, &settings),
             backends: vec![Listening::Unknown; project.routes.len()],
         };
-        if project.host != LOCAL_HOST_ID {
-            if project.routes.iter().any(|r| r.target == Target::Container) {
-                report.warnings.push(format!(
-                    "{}: on host '{}', which is not managed yet; use host-port routes",
-                    project.slug, project.host
-                ));
+        let known_host = hosts.iter().find(|h| h.id == project.host);
+        if project.host == LOCAL_HOST_ID {
+            if let (Some(runtime), Some(containers)) = (runtime, &containers) {
+                look_at_container(
+                    runtime,
+                    project,
+                    containers,
+                    &settings.network,
+                    &mut status,
+                    &mut report,
+                )
+                .await;
             }
-        } else if let (Some(runtime), Some(containers)) = (runtime, &containers) {
-            match find_container(project, containers) {
-                None => status.state = ContainerState::Missing,
-                Some(c) => {
-                    status.container = Some(c.name.clone());
-                    status.state = if c.running {
-                        ContainerState::Running
-                    } else {
-                        ContainerState::Stopped
-                    };
-                    status.attached = c.networks.contains_key(&settings.network);
-                    if c.running && !status.attached && needs_network(project) {
-                        // The alias is a convenience; routes use the container name.
-                        let aliases = [project.slug.clone()];
-                        match runtime.connect(&c.id, &settings.network, &aliases).await {
-                            Ok(()) => {
-                                status.attached = true;
-                                report.actions.push(Action::AttachedProject {
-                                    slug: project.slug.clone(),
-                                    container: c.name.clone(),
-                                });
-                            }
-                            Err(e) => report.warnings.push(format!("{}: {e}", project.slug)),
-                        }
-                    }
-                    if c.running && needs_network(project) {
-                        // Failing to look is not worth a warning; the routes
-                        // just stay unchecked.
-                        if let Ok(table) = runtime.exec(&c.id, health::COMMAND).await {
-                            let ports = health::parse(&table);
-                            for (route, state) in project.routes.iter().zip(&mut status.backends) {
-                                if route.target == Target::Container {
-                                    *state = health::port_state(&ports, route.port);
-                                }
-                            }
-                        }
-                    }
+        } else if let Some(ctx) = remote.get(&project.host) {
+            look_at_container(
+                ctx.runtime,
+                project,
+                &ctx.containers,
+                &settings.network,
+                &mut status,
+                &mut report,
+            )
+            .await;
+            // The edge Traefik on that host routes to the container.
+            let path = format!(
+                "{}/{}",
+                crate::runtime::EDGE_ROUTES_DIR,
+                traefik::file_name(&project.slug)
+            );
+            let written = async {
+                let wanted = traefik::render_edge(project, &settings, status.container.as_deref())?;
+                if ctx.runtime.read_file(EDGE_CONTAINER, &path).await? == Some(wanted.clone()) {
+                    return Ok(false);
                 }
+                ctx.runtime
+                    .write_file(EDGE_CONTAINER, &path, &wanted)
+                    .await?;
+                Ok::<bool, Error>(true)
             }
+            .await;
+            match written {
+                Ok(true) => report.actions.push(Action::WroteEdgeRoutes {
+                    slug: project.slug.clone(),
+                }),
+                Ok(false) => {}
+                Err(e) => report.warnings.push(format!("{}: {e}", project.slug)),
+            }
+        } else if known_host.is_none() {
+            report.warnings.push(format!(
+                "{}: its host '{}' is not registered; add it with `zevo host add`",
+                project.slug, project.host
+            ));
         }
 
         // HTTPS entrypoints need a certificate browsers trust for these names.
@@ -295,7 +416,14 @@ pub async fn reconcile_with(
 
         // Containers are reached by their own name, which changes on rebuild,
         // so the file follows the container that currently exists.
-        match traefik::write_project_for(project, &settings, status.container.as_deref()) {
+        let wrote = match known_host {
+            // Remote: this machine's Traefik hands over to the host's edge.
+            Some(host) => {
+                traefik::write_project_via_edge(project, &settings, &host.address, host.edge_port)
+            }
+            None => traefik::write_project_for(project, &settings, status.container.as_deref()),
+        };
+        match wrote {
             Ok(true) => report.actions.push(Action::WroteRoutes {
                 slug: project.slug.clone(),
             }),
@@ -321,6 +449,35 @@ pub async fn reconcile_with(
             report.actions.push(Action::RemovedOrphanRoutes { slug });
         }
     }
+    // Route files left in an edge Traefik by projects that are gone.
+    for ctx in remote.values() {
+        let Ok(files) = ctx
+            .runtime
+            .list_dir(EDGE_CONTAINER, crate::runtime::EDGE_ROUTES_DIR)
+            .await
+        else {
+            continue;
+        };
+        for file in files {
+            let Some(slug) = file
+                .strip_prefix("zevo-")
+                .and_then(|f| f.strip_suffix(".yml"))
+            else {
+                continue;
+            };
+            if !projects
+                .iter()
+                .any(|p| p.slug == slug && p.host == ctx.host.id)
+            {
+                let path = format!("{}/{file}", crate::runtime::EDGE_ROUTES_DIR);
+                if ctx.runtime.remove_file(EDGE_CONTAINER, &path).await.is_ok() {
+                    report.actions.push(Action::RemovedOrphanRoutes {
+                        slug: slug.to_string(),
+                    });
+                }
+            }
+        }
+    }
     if let Some(reason) = uncertified {
         report.warnings.push(format!(
             "Zevo could not create HTTPS certificates, so browsers may warn about project \
@@ -328,6 +485,56 @@ pub async fn reconcile_with(
         ));
     }
     Ok(report)
+}
+
+/// Finds a project's container on one machine, attaches it to the shared
+/// network if needed, and checks that its routes' ports are reachable.
+async fn look_at_container(
+    runtime: &dyn Runtime,
+    project: &Project,
+    containers: &[ContainerInfo],
+    network: &str,
+    status: &mut ProjectStatus,
+    report: &mut Report,
+) {
+    let uses_network = project.routes.iter().any(|r| r.target == Target::Container);
+    let Some(c) = find_container(project, containers) else {
+        status.state = ContainerState::Missing;
+        return;
+    };
+    status.container = Some(c.name.clone());
+    status.state = if c.running {
+        ContainerState::Running
+    } else {
+        ContainerState::Stopped
+    };
+    status.attached = c.networks.contains_key(network);
+    if !c.running || !uses_network {
+        return;
+    }
+    if !status.attached {
+        // The alias is a convenience; routes use the container name.
+        let aliases = [project.slug.clone()];
+        match runtime.connect(&c.id, network, &aliases).await {
+            Ok(()) => {
+                status.attached = true;
+                report.actions.push(Action::AttachedProject {
+                    slug: project.slug.clone(),
+                    container: c.name.clone(),
+                });
+            }
+            Err(e) => report.warnings.push(format!("{}: {e}", project.slug)),
+        }
+    }
+    // Failing to look is not worth a warning; the routes just stay unchecked.
+    if let Ok(table) = runtime.exec(&c.id, health::COMMAND).await {
+        let ports = health::parse(&table);
+        for (route, state) in project.routes.iter().zip(&mut status.backends) {
+            if route.target == Target::Container {
+                *state = health::port_state(&ports, route.port);
+            }
+        }
+    }
 }
 
 /// Ensures the network exists and Traefik is on it; returns the container list.
@@ -633,6 +840,131 @@ mod tests {
         assert_eq!(
             found,
             [("/work/blog/", "vsc-blog"), ("/work/docs", "vsc-docs-new")]
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_projects_go_through_the_hosts_edge_traefik() {
+        let (_tmp, store, local) = set_up().await;
+        let host = Host::from_ssh("dev@192.168.1.20", Some("buildbox"), None).unwrap();
+        store.add_host(&host).unwrap();
+        let mut p = project("billing", "/srv/billing");
+        p.host = "buildbox".into();
+        store.add_project(&p).unwrap();
+
+        let far = FakeRuntime::new();
+        far.add_container(devcontainer("vsc-billing", "/srv/billing"));
+        far.add_container(devcontainer("vsc-other", "/srv/other"));
+        let mut remotes = RemoteRuntimes::new();
+        remotes.insert("buildbox".into(), Ok(&far as &dyn Runtime));
+        let issuer = certs::FakeIssuer::default();
+
+        let report = reconcile_hosts(&store, Some(&local), &remotes, &issuer)
+            .await
+            .unwrap();
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert!(report.actions.contains(&Action::StartedEdge {
+            host: "buildbox".into()
+        }));
+        assert!(report.actions.contains(&Action::WroteEdgeRoutes {
+            slug: "billing".into()
+        }));
+        assert_eq!(report.projects[0].state, ContainerState::Running);
+        assert!(report.projects[0].attached);
+
+        // Remote: the container joined the network and the edge has its routes.
+        assert!(
+            far.container("vsc-billing")
+                .unwrap()
+                .networks
+                .contains_key("zevo")
+        );
+        assert!(far.container(EDGE_CONTAINER).unwrap().running);
+        let edge = far
+            .read_file(EDGE_CONTAINER, "/etc/traefik/dynamic/zevo-billing.yml")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(edge.contains("- url: http://vsc-billing:3000"), "{edge}");
+        // Local: this machine's Traefik forwards to the host's edge port.
+        let front =
+            std::fs::read_to_string(store.managed_dynamic_dir().join("zevo-billing.yml")).unwrap();
+        assert!(front.contains("- url: http://192.168.1.20:8480"), "{front}");
+        // The other devcontainer there is offered for adding.
+        assert_eq!(report.discovered.len(), 1);
+        assert_eq!(
+            (
+                report.discovered[0].host.as_str(),
+                report.discovered[0].container.as_str()
+            ),
+            ("buildbox", "vsc-other")
+        );
+
+        // Settled: a second pass changes nothing.
+        let again = reconcile_hosts(&store, Some(&local), &remotes, &issuer)
+            .await
+            .unwrap();
+        assert!(again.actions.is_empty(), "{:?}", again.actions);
+
+        // Removing the project cleans up both sides.
+        register::remove(&store, "billing").unwrap();
+        let report = reconcile_hosts(&store, Some(&local), &remotes, &issuer)
+            .await
+            .unwrap();
+        assert!(report.actions.contains(&Action::RemovedOrphanRoutes {
+            slug: "billing".into()
+        }));
+        assert!(
+            !store
+                .managed_dynamic_dir()
+                .join("zevo-billing.yml")
+                .exists()
+        );
+        assert_eq!(
+            far.read_file(EDGE_CONTAINER, "/etc/traefik/dynamic/zevo-billing.yml")
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_host_is_one_warning_and_routes_still_point_at_it() {
+        let (_tmp, store, local) = set_up().await;
+        store
+            .add_host(&Host::from_ssh("dev@192.168.1.20", Some("buildbox"), None).unwrap())
+            .unwrap();
+        for slug in ["billing", "ledger"] {
+            let mut p = project(slug, &format!("/srv/{slug}"));
+            p.host = "buildbox".into();
+            store.add_project(&p).unwrap();
+        }
+        let mut remotes = RemoteRuntimes::new();
+        remotes.insert("buildbox".into(), Err("connection timed out".into()));
+
+        let report = reconcile_hosts(
+            &store,
+            Some(&local),
+            &remotes,
+            &certs::FakeIssuer::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        assert!(
+            report.warnings[0].contains("buildbox") && report.warnings[0].contains("timed out")
+        );
+        assert!(
+            report
+                .projects
+                .iter()
+                .all(|p| p.state == ContainerState::Unknown)
+        );
+        assert!(
+            store
+                .managed_dynamic_dir()
+                .join("zevo-billing.yml")
+                .exists()
         );
     }
 

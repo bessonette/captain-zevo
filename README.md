@@ -118,6 +118,28 @@ adds it gets the same addresses with nothing to type:
   `zevo add <folder> --address host.docker.internal` points every declared
   route at that address instead of the container.
 
+### Projects on other machines
+
+Zevo can manage devcontainers that run on another machine you reach over SSH:
+
+```sh
+zevo host add dev@192.168.1.20 --name buildbox   # checks SSH and Docker first
+zevo discover                                    # lists devcontainers there too
+zevo add --host buildbox /srv/dev/billing
+```
+
+- SSH must work without typing (keys or an agent); Zevo never prompts.
+- The remote needs only Docker. Zevo talks to it by forwarding its Docker
+  socket over SSH, and starts one container there, `zevo-edge`: a small
+  Traefik listening on port 8480 that routes to that machine's project
+  containers over a shared network. No project publishes ports.
+- Your local Traefik stays the front door. It serves HTTPS with the local
+  certificates and forwards each remote project's hostnames to the host's
+  edge, so addresses keep working with no editor window open.
+- The edge port speaks plain HTTP to anyone who can reach that machine on
+  your network. Use this on networks you trust.
+- Remote hosts are not supported when Zevo itself runs on Windows yet.
+
 ### Adopting an existing Traefik
 
 `zevo setup` inspects running Traefik containers. To be adopted, a Traefik
@@ -179,8 +201,9 @@ Hand edits take effect on the next `zevo reconcile`.
 3. **Lifecycle and editors** — discovery of running devcontainers and open in
    VS Code (and forks) or Zed are done. Still to come: start/stop/rebuild,
    logs, new projects from templates, JetBrains.
-4. **Remote hosts** — projects on other machines over SSH, with an edge Traefik
-   per host.
+4. **Remote hosts** — built: hosts over SSH, discovery, and an edge Traefik per
+   host. Not yet: re-reading a remote project's declaration after it is added,
+   and its env file.
 5. **Polish** — installers, system tray, local HTTPS.
 
 ## Desktop app (preview)

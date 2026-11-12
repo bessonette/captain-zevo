@@ -8,11 +8,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use zevo_core::certs::{self, Issuer as _};
 use zevo_core::ide::{self, Editor};
-use zevo_core::model::{Route, Target};
+use zevo_core::model::{Host, LOCAL_HOST_ID, Route, Target};
 use zevo_core::reconcile::{self, Action, ContainerState, Report};
 use zevo_core::runtime::{DockerRuntime, Runtime};
 use zevo_core::store::Store;
-use zevo_core::{doctor, register, setup, traefik};
+use zevo_core::{doctor, register, remote, setup, traefik};
 
 #[derive(Parser)]
 #[command(
@@ -56,8 +56,13 @@ enum Command {
     },
     /// Check that everything Zevo depends on is working.
     Doctor,
-    /// List devcontainers on this machine that are not registered yet.
+    /// List devcontainers, here and on remote hosts, that are not registered yet.
     Discover,
+    /// Manage other machines that run project containers.
+    Host {
+        #[command(subcommand)]
+        command: HostCommand,
+    },
     /// Open a project in an editor, attached to its devcontainer.
     Open {
         slug: String,
@@ -92,8 +97,11 @@ struct SetupArgs {
 
 #[derive(Args)]
 struct AddArgs {
-    /// Project folder.
+    /// Project folder (on the remote machine when --host is given).
     path: PathBuf,
+    /// Id of the remote host the folder is on (see `zevo host ls`).
+    #[arg(long)]
+    host: Option<String>,
     /// Short id used in the hostname (default: derived from the folder name).
     #[arg(long)]
     slug: Option<String>,
@@ -108,6 +116,25 @@ struct AddArgs {
     address: Option<String>,
     #[arg(long = "tag")]
     tags: Vec<String>,
+}
+
+#[derive(Subcommand)]
+enum HostCommand {
+    /// Register a machine reached over SSH (key-based login required).
+    Add {
+        /// user@address, or a name from your SSH config.
+        ssh: String,
+        /// Display name (default: the address).
+        #[arg(long)]
+        name: Option<String>,
+        /// Address this machine's Traefik uses to reach it, if different.
+        #[arg(long)]
+        address: Option<String>,
+    },
+    /// List hosts and whether Docker answers on each.
+    Ls,
+    /// Unregister a host that has no projects.
+    Rm { id: String },
 }
 
 #[derive(Subcommand)]
@@ -271,6 +298,40 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 }
             }
         }
+        Command::Host { command } => match command {
+            HostCommand::Add { ssh, name, address } => {
+                let host = Host::from_ssh(&ssh, name.as_deref(), address.as_deref())?;
+                // Prove the connection before saving anything.
+                let tunnel = remote::Tunnel::open(&host)?;
+                let version = tunnel.runtime()?.ping().await?;
+                store.add_host(&host)?;
+                println!("Added host '{}' ({version}).", host.id);
+                println!(
+                    "Add its projects with: zevo add --host {} <folder on that machine>",
+                    host.id
+                );
+            }
+            HostCommand::Ls => {
+                let hosts = store.hosts()?;
+                if hosts.is_empty() {
+                    println!("No remote hosts. Add one with: zevo host add user@address");
+                }
+                for host in hosts {
+                    let status = match remote::Tunnel::open(&host) {
+                        Ok(tunnel) => match tunnel.runtime() {
+                            Ok(rt) => rt.ping().await.unwrap_or_else(|e| e.to_string()),
+                            Err(e) => e.to_string(),
+                        },
+                        Err(e) => e.to_string(),
+                    };
+                    println!("{:<16} {:<28} {}", host.id, host.ssh, status);
+                }
+            }
+            HostCommand::Rm { id } => {
+                store.remove_host(&id)?;
+                println!("Removed host {id}.");
+            }
+        },
         Command::Discover => {
             let report = reconcile_once(&store).await?;
             if cli.json {
@@ -280,9 +341,14 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             } else {
                 for d in &report.discovered {
                     let state = if d.running { "running" } else { "stopped" };
-                    println!("{:<10} {}", state, d.folder.display());
+                    let host = if d.host == LOCAL_HOST_ID {
+                        "this machine"
+                    } else {
+                        d.host.as_str()
+                    };
+                    println!("{:<10} {:<16} {}", state, host, d.folder.display());
                 }
-                println!("\nRegister one with: zevo add <folder>");
+                println!("\nRegister one with: zevo add [--host <id>] <folder>");
             }
         }
         Command::Open { slug, editor } => {
@@ -306,7 +372,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                         )
                     })?,
             };
-            ide::open(editor, &project)?;
+            let host = match project.host.as_str() {
+                LOCAL_HOST_ID => None,
+                id => Some(store.host(id)?),
+            };
+            ide::open(editor, &project, host.as_ref())?;
             println!("Opening {} in {}.", project.slug, editor.name());
         }
         Command::Doctor => {
@@ -334,8 +404,35 @@ async fn run(cli: Cli) -> Result<ExitCode> {
 
 async fn reconcile_once(store: &Store) -> Result<Report> {
     let (runtime, reason) = connect().await;
-    let mut report =
-        reconcile::reconcile(store, runtime.as_ref().map(|r| r as &dyn Runtime)).await?;
+
+    // One SSH connection per remote host, open for the length of this pass.
+    let hosts = store.hosts()?;
+    let mut tunnels = Vec::new();
+    for host in &hosts {
+        let opened = remote::Tunnel::open(host).and_then(|tunnel| {
+            let runtime = tunnel.runtime()?;
+            Ok((tunnel, runtime))
+        });
+        tunnels.push((host.id.clone(), opened.map_err(|e| e.to_string())));
+    }
+    let mut remotes = reconcile::RemoteRuntimes::new();
+    for (id, opened) in &tunnels {
+        remotes.insert(
+            id.clone(),
+            match opened {
+                Ok((_, runtime)) => Ok(runtime as &dyn Runtime),
+                Err(e) => Err(e.clone()),
+            },
+        );
+    }
+
+    let mut report = reconcile::reconcile_hosts(
+        store,
+        runtime.as_ref().map(|r| r as &dyn Runtime),
+        &remotes,
+        &certs::Mkcert,
+    )
+    .await?;
     if let Some(reason) = reason {
         report
             .warnings
@@ -423,7 +520,10 @@ async fn cmd_setup(store: &Store, args: SetupArgs) -> Result<()> {
 
 async fn cmd_add(store: &Store, args: AddArgs, json: bool) -> Result<()> {
     let settings = store.settings()?;
-    let mut project = register::draft(&args.path)?;
+    let mut project = match &args.host {
+        Some(id) => register::draft_remote(&store.host(id)?, &args.path.to_string_lossy())?,
+        None => register::draft(&args.path)?,
+    };
     if let Some(slug) = args.slug {
         project.slug = slug;
     }
@@ -562,6 +662,8 @@ fn print_actions_only(report: &Report) {
             }
             Action::IssuedCertificate { slug } => println!("created HTTPS certificate for {slug}"),
             Action::WroteEnvFile { slug } => println!("wrote env file for {slug}"),
+            Action::StartedEdge { host } => println!("started the edge Traefik on {host}"),
+            Action::WroteEdgeRoutes { slug } => println!("wrote edge routes for {slug}"),
         }
     }
 }

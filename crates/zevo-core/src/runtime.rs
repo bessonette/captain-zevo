@@ -78,6 +78,21 @@ impl TraefikSpec {
     }
 }
 
+/// The edge Traefik Zevo runs on a remote host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EdgeSpec {
+    pub container: String,
+    pub image: String,
+    pub network: String,
+    /// Volume holding the route files.
+    pub volume: String,
+    /// Host port published for its `web` entrypoint.
+    pub port: u16,
+}
+
+/// Directory inside the edge container where route files live.
+pub const EDGE_ROUTES_DIR: &str = "/etc/traefik/dynamic";
+
 #[async_trait]
 pub trait Runtime: Send + Sync {
     /// Returns a short description of the runtime (name and version).
@@ -90,6 +105,15 @@ pub trait Runtime: Send + Sync {
     async fn disconnect(&self, container: &str, network: &str) -> Result<()>;
     /// Runs a command in a running container and returns what it printed.
     async fn exec(&self, container: &str, command: &[&str]) -> Result<String>;
+    /// Makes sure the edge Traefik exists and is running. Returns true if it
+    /// had to be created or started.
+    async fn ensure_edge(&self, spec: &EdgeSpec) -> Result<bool>;
+    /// Text of a file inside a running container, or `None` if it is missing.
+    async fn read_file(&self, container: &str, path: &str) -> Result<Option<String>>;
+    async fn write_file(&self, container: &str, path: &str, content: &str) -> Result<()>;
+    async fn remove_file(&self, container: &str, path: &str) -> Result<()>;
+    /// File names in a directory inside a running container.
+    async fn list_dir(&self, container: &str, dir: &str) -> Result<Vec<String>>;
     /// Pulls the image if needed, then creates and starts the Traefik container.
     async fn run_traefik(&self, spec: &TraefikSpec) -> Result<()>;
 }

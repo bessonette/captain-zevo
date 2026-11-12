@@ -195,6 +195,74 @@ fn default_host() -> String {
     LOCAL_HOST_ID.into()
 }
 
+/// Port the edge Traefik on a remote host listens on, unless changed.
+pub const DEFAULT_EDGE_PORT: u16 = 8480;
+
+/// Another machine that runs project containers, reached over SSH.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Host {
+    /// Unique id, used in project files.
+    pub id: String,
+    pub name: String,
+    /// What to pass to `ssh`: `user@address` or a name from `~/.ssh/config`.
+    pub ssh: String,
+    /// Address this machine's Traefik uses to reach the host.
+    pub address: String,
+    /// Docker socket on the host, if not `/var/run/docker.sock`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker_socket: Option<String>,
+    /// Port of the host's edge Traefik.
+    #[serde(default = "default_edge_port")]
+    pub edge_port: u16,
+}
+
+fn default_edge_port() -> u16 {
+    DEFAULT_EDGE_PORT
+}
+
+impl Host {
+    /// Builds a host from an SSH destination, deriving the rest.
+    pub fn from_ssh(ssh: &str, name: Option<&str>, address: Option<&str>) -> Result<Host> {
+        let ssh = ssh.trim();
+        let plain = !ssh.is_empty()
+            && !ssh.starts_with('-')
+            && ssh.bytes().all(|b| {
+                b.is_ascii_alphanumeric()
+                    || matches!(b, b'@' | b'.' | b'-' | b'_' | b':' | b'[' | b']')
+            });
+        if !plain {
+            return Err(Error::Other(format!(
+                "'{ssh}' is not a valid SSH destination (use user@address or a name from your SSH config)"
+            )));
+        }
+        let machine = ssh.rsplit('@').next().unwrap_or(ssh);
+        let name = name
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .unwrap_or(machine)
+            .to_string();
+        let id = slugify(&name);
+        validate_slug(&id)?;
+        if id == LOCAL_HOST_ID {
+            return Err(Error::Other(
+                "'local' is reserved for this machine; choose another name".into(),
+            ));
+        }
+        Ok(Host {
+            id,
+            name,
+            ssh: ssh.to_string(),
+            address: address
+                .map(str::trim)
+                .filter(|a| !a.is_empty())
+                .unwrap_or(machine)
+                .to_string(),
+            docker_socket: None,
+            edge_port: DEFAULT_EDGE_PORT,
+        })
+    }
+}
+
 /// Checks that `s` is usable as a DNS label and Docker network alias.
 pub fn validate_slug(s: &str) -> Result<()> {
     let ok = !s.is_empty()
@@ -239,6 +307,25 @@ mod tests {
         assert!(validate_slug(&slugify("captain-zevo")).is_ok());
         assert!(validate_slug("Bad_Name").is_err());
         assert!(validate_slug("").is_err());
+    }
+
+    #[test]
+    fn hosts_from_ssh_destinations() {
+        let h = Host::from_ssh("dev@192.168.1.20", None, None).unwrap();
+        assert_eq!(
+            (h.id.as_str(), h.address.as_str()),
+            ("192-168-1-20", "192.168.1.20")
+        );
+        let h = Host::from_ssh("buildbox", Some("Build Box"), Some("10.0.0.5")).unwrap();
+        assert_eq!(
+            (h.id.as_str(), h.name.as_str(), h.address.as_str()),
+            ("build-box", "Build Box", "10.0.0.5")
+        );
+        assert_eq!(h.edge_port, DEFAULT_EDGE_PORT);
+        // Nothing that ssh could read as an option or a command.
+        assert!(Host::from_ssh("-oProxyCommand=evil", None, None).is_err());
+        assert!(Host::from_ssh("host; rm -rf /", None, None).is_err());
+        assert!(Host::from_ssh("me@box", Some("local"), None).is_err());
     }
 
     #[test]

@@ -18,6 +18,8 @@ struct State {
     networks: Vec<String>,
     /// When set, every call fails with this message.
     down: Option<String>,
+    /// (container name, path) to content, for the file operations.
+    files: std::collections::BTreeMap<(String, String), String>,
     /// Container name to what `exec` prints in it.
     exec_output: std::collections::BTreeMap<String, String>,
 }
@@ -132,6 +134,69 @@ impl Runtime for FakeRuntime {
                 .get(&name)
                 .cloned()
                 .ok_or_else(|| Error::Runtime(format!("cannot run commands in {name}")))
+        })
+    }
+
+    async fn ensure_edge(&self, spec: &super::EdgeSpec) -> Result<bool> {
+        self.with(|s| {
+            if let Some(existing) = s.containers.iter_mut().find(|c| c.name == spec.container) {
+                let was_running = std::mem::replace(&mut existing.running, true);
+                return Ok(!was_running);
+            }
+            if !s.networks.iter().any(|n| n == &spec.network) {
+                return Err(Error::Runtime(format!(
+                    "network {} not found",
+                    spec.network
+                )));
+            }
+            s.containers.push(ContainerInfo {
+                id: format!("id-{}", spec.container),
+                name: spec.container.clone(),
+                image: spec.image.clone(),
+                running: true,
+                networks: [(spec.network.clone(), Vec::new())].into(),
+                published_ports: [(80, spec.port)].into(),
+                ..ContainerInfo::default()
+            });
+            Ok(true)
+        })
+    }
+
+    async fn read_file(&self, container: &str, path: &str) -> Result<Option<String>> {
+        self.with(|s| {
+            let name = find(s, container)?.name.clone();
+            Ok(s.files.get(&(name, path.to_string())).cloned())
+        })
+    }
+
+    async fn write_file(&self, container: &str, path: &str, content: &str) -> Result<()> {
+        self.with(|s| {
+            let name = find(s, container)?.name.clone();
+            s.files
+                .insert((name, path.to_string()), content.to_string());
+            Ok(())
+        })
+    }
+
+    async fn remove_file(&self, container: &str, path: &str) -> Result<()> {
+        self.with(|s| {
+            let name = find(s, container)?.name.clone();
+            s.files.remove(&(name, path.to_string()));
+            Ok(())
+        })
+    }
+
+    async fn list_dir(&self, container: &str, dir: &str) -> Result<Vec<String>> {
+        self.with(|s| {
+            let name = find(s, container)?.name.clone();
+            let prefix = format!("{}/", dir.trim_end_matches('/'));
+            Ok(s.files
+                .keys()
+                .filter(|(c, _)| *c == name)
+                .filter_map(|(_, path)| path.strip_prefix(&prefix))
+                .filter(|rest| !rest.contains('/'))
+                .map(str::to_string)
+                .collect())
         })
     }
 

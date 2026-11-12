@@ -25,6 +25,17 @@ pub struct DockerRuntime {
 const MANAGED_LABEL: &str = "dev.captain-zevo.managed";
 
 impl DockerRuntime {
+    /// Connects to a specific Docker socket, such as one forwarded from
+    /// another machine.
+    pub fn connect_socket(path: &std::path::Path) -> Result<Self> {
+        let path = path
+            .to_str()
+            .ok_or_else(|| Error::Runtime("the socket path is not valid UTF-8".into()))?;
+        Docker::connect_with_socket(path, 120, bollard::API_DEFAULT_VERSION)
+            .map(|docker| Self { docker })
+            .map_err(err)
+    }
+
     async fn remove_forced(&self, container: &str) -> Result<()> {
         let options = bollard::query_parameters::RemoveContainerOptionsBuilder::default()
             .force(true)
@@ -256,6 +267,140 @@ impl Runtime for DockerRuntime {
             }
         }
         Ok(String::from_utf8_lossy(&printed).into_owned())
+    }
+
+    async fn ensure_edge(&self, spec: &super::EdgeSpec) -> Result<bool> {
+        match self.docker.inspect_container(&spec.container, None).await {
+            Ok(existing) => {
+                let ours = existing
+                    .config
+                    .and_then(|c| c.labels)
+                    .is_some_and(|labels| labels.contains_key(MANAGED_LABEL));
+                if !ours {
+                    return Err(Error::Runtime(format!(
+                        "a container named '{}' already exists there and was not created by Zevo",
+                        spec.container
+                    )));
+                }
+                if existing.state.and_then(|s| s.running).unwrap_or(false) {
+                    return Ok(false);
+                }
+                self.docker
+                    .start_container(&spec.container, None)
+                    .await
+                    .map_err(err)?;
+                return Ok(true);
+            }
+            Err(e) if is_status(&e, 404) => {}
+            Err(e) => return Err(err(e)),
+        }
+
+        let pull = CreateImageOptionsBuilder::default()
+            .from_image(&spec.image)
+            .build();
+        self.docker
+            .create_image(Some(pull), None, None)
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(err)?;
+        let body = ContainerCreateBody {
+            image: Some(spec.image.clone()),
+            cmd: Some(vec![
+                format!("--providers.file.directory={}", super::EDGE_ROUTES_DIR),
+                "--providers.file.watch=true".to_string(),
+                "--entrypoints.web.address=:80".to_string(),
+            ]),
+            labels: Some(HashMap::from([(
+                MANAGED_LABEL.to_string(),
+                "true".to_string(),
+            )])),
+            exposed_ports: Some(vec!["80/tcp".to_string()]),
+            host_config: Some(HostConfig {
+                // A named volume: route files are written through the Docker
+                // API, so nothing on the host's filesystem is touched.
+                binds: Some(vec![format!("{}:{}", spec.volume, super::EDGE_ROUTES_DIR)]),
+                port_bindings: Some(HashMap::from([(
+                    "80/tcp".to_string(),
+                    Some(vec![PortBinding {
+                        host_ip: None,
+                        host_port: Some(spec.port.to_string()),
+                    }]),
+                )])),
+                restart_policy: Some(RestartPolicy {
+                    name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
+                    maximum_retry_count: None,
+                }),
+                ..Default::default()
+            }),
+            networking_config: Some(NetworkingConfig {
+                endpoints_config: Some(HashMap::from([(
+                    spec.network.clone(),
+                    EndpointSettings::default(),
+                )])),
+            }),
+            ..Default::default()
+        };
+        let options = CreateContainerOptionsBuilder::default()
+            .name(&spec.container)
+            .build();
+        self.docker
+            .create_container(Some(options), body)
+            .await
+            .map_err(err)?;
+        if let Err(e) = self.docker.start_container(&spec.container, None).await {
+            let _ = self.remove_forced(&spec.container).await;
+            return Err(err(e));
+        }
+        Ok(true)
+    }
+
+    // The file operations run a shell in the container. Values are passed as
+    // arguments ("$1", "$2"), never spliced into the script.
+    async fn read_file(&self, container: &str, path: &str) -> Result<Option<String>> {
+        let out = self
+            .exec(
+                container,
+                &[
+                    "sh",
+                    "-c",
+                    r#"[ -f "$1" ] && { echo found; cat "$1"; }"#,
+                    "sh",
+                    path,
+                ],
+            )
+            .await?;
+        Ok(out.strip_prefix("found\n").map(str::to_string))
+    }
+
+    async fn write_file(&self, container: &str, path: &str, content: &str) -> Result<()> {
+        // Write beside the target, then rename, so a reader never sees half a
+        // file. The temporary name has no extension Traefik loads.
+        let script = r#"printf '%s' "$1" > "$2.tmp" && mv "$2.tmp" "$2" && echo written"#;
+        let out = self
+            .exec(container, &["sh", "-c", script, "sh", content, path])
+            .await?;
+        if out.trim() == "written" {
+            Ok(())
+        } else {
+            Err(Error::Runtime(format!(
+                "could not write {path} in {container}"
+            )))
+        }
+    }
+
+    async fn remove_file(&self, container: &str, path: &str) -> Result<()> {
+        self.exec(container, &["rm", "-f", "--", path])
+            .await
+            .map(|_| ())
+    }
+
+    async fn list_dir(&self, container: &str, dir: &str) -> Result<Vec<String>> {
+        let out = self.exec(container, &["ls", "-1", "--", dir]).await?;
+        Ok(out
+            .lines()
+            .map(str::to_string)
+            .filter(|l| !l.is_empty())
+            .collect())
     }
 
     async fn run_traefik(&self, spec: &TraefikSpec) -> Result<()> {

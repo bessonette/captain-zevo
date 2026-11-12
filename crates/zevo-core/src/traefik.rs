@@ -153,10 +153,49 @@ pub fn render_for(
     settings: &Settings,
     container: Option<&str>,
 ) -> Result<String> {
+    render_mode(project, settings, Mode::Front { container })
+}
+
+/// The front (local) file for a project on another machine: its container
+/// routes are sent to that machine's edge Traefik, which finishes the job.
+pub fn render_via_edge(
+    project: &Project,
+    settings: &Settings,
+    address: &str,
+    port: u16,
+) -> Result<String> {
+    render_mode(project, settings, Mode::FrontViaEdge { address, port })
+}
+
+/// The file for a remote machine's edge Traefik: plain HTTP on its `web`
+/// entrypoint, routed to the project's container on that machine.
+pub fn render_edge(
+    project: &Project,
+    settings: &Settings,
+    container: Option<&str>,
+) -> Result<String> {
+    render_mode(project, settings, Mode::Edge { container })
+}
+
+/// Entrypoint name of every edge Traefik Zevo starts.
+pub const EDGE_ENTRYPOINT: &str = "web";
+
+#[derive(Clone, Copy)]
+enum Mode<'a> {
+    /// The Traefik users connect to, reaching the container directly.
+    Front { container: Option<&'a str> },
+    /// The Traefik users connect to, forwarding to an edge Traefik.
+    FrontViaEdge { address: &'a str, port: u16 },
+    /// An edge Traefik next to the container.
+    Edge { container: Option<&'a str> },
+}
+
+fn render_mode(project: &Project, settings: &Settings, mode: Mode) -> Result<String> {
     let traefik = traefik_settings(settings)?;
     let mut routers = BTreeMap::new();
     let mut services = BTreeMap::new();
     let mut servers_transports = BTreeMap::new();
+    let front = !matches!(mode, Mode::Edge { .. });
 
     for (route, name) in project.routes.iter().zip(route_names(project)) {
         let hostname = route.hostname(&project.slug, &settings.domain_suffix);
@@ -164,41 +203,56 @@ pub fn render_for(
         if let Some(prefix) = &route.path_prefix {
             rule.push_str(&format!(" && PathPrefix(`{prefix}`)"));
         }
-        let host = match &route.target {
-            Target::Container => container.unwrap_or(&project.slug).to_string(),
-            Target::HostPort { address } => url_host(address),
+        // Where this Traefik sends the request, and whether it speaks the
+        // app's own protocol (the last hop) or plain HTTP to another Traefik.
+        let (host, port, last_hop) = match (&route.target, mode) {
+            (Target::HostPort { address }, Mode::Front { .. } | Mode::FrontViaEdge { .. }) => {
+                (url_host(address), route.port, true)
+            }
+            // Fixed addresses are reached from the front; the edge has no part.
+            (Target::HostPort { .. }, Mode::Edge { .. }) => continue,
+            (Target::Container, Mode::Front { container } | Mode::Edge { container }) => (
+                container.unwrap_or(&project.slug).to_string(),
+                route.port,
+                true,
+            ),
+            (Target::Container, Mode::FrontViaEdge { address, port }) => {
+                (url_host(address), port, false)
+            }
         };
         routers.insert(
             name.clone(),
             Router {
                 rule,
-                entry_points: vec![traefik.entrypoint.clone()],
-                tls: traefik.tls.then_some(Tls {}),
+                entry_points: vec![if front {
+                    traefik.entrypoint.clone()
+                } else {
+                    EDGE_ENTRYPOINT.to_string()
+                }],
+                tls: (front && traefik.tls).then_some(Tls {}),
                 service: name.clone(),
             },
         );
-        let scheme = match route.backend {
-            Backend::Http => "http",
-            Backend::Https => {
-                // The dialed address is rarely the name the app expects, so
-                // present the public hostname as SNI.
-                servers_transports.insert(
-                    name.clone(),
-                    ServersTransport {
-                        server_name: hostname.clone(),
-                        insecure_skip_verify: true,
-                    },
-                );
-                "https"
-            }
-        };
+        let https_backend = last_hop && route.backend == Backend::Https;
+        if https_backend {
+            // The dialed address is rarely the name the app expects, so
+            // present the public hostname as SNI.
+            servers_transports.insert(
+                name.clone(),
+                ServersTransport {
+                    server_name: hostname.clone(),
+                    insecure_skip_verify: true,
+                },
+            );
+        }
+        let scheme = if https_backend { "https" } else { "http" };
         services.insert(
             name.clone(),
             Service {
                 load_balancer: LoadBalancer {
-                    servers_transport: (route.backend == Backend::Https).then(|| name.clone()),
+                    servers_transport: https_backend.then(|| name.clone()),
                     servers: vec![Server {
-                        url: format!("{scheme}://{host}:{}", route.port),
+                        url: format!("{scheme}://{host}:{port}"),
                     }],
                 },
             },
@@ -212,7 +266,7 @@ pub fn render_for(
             servers_transports,
         },
         // Present once `certs::ensure` has issued the project's certificate.
-        tls: if traefik.tls {
+        tls: if front && traefik.tls {
             certs::existing(&project.slug, traefik).map(|(cert_file, key_file)| TlsDoc {
                 certificates: vec![Certificate {
                     cert_file,
@@ -231,10 +285,6 @@ pub fn render_for(
     })?;
     Ok(format!("{MANAGED_HEADER}\n{body}"))
 }
-
-// ---------------------------------------------------------------------------
-// Writing / removing
-// ---------------------------------------------------------------------------
 
 fn has_header(content: &str) -> bool {
     content.lines().next().map(|l| l.trim_end_matches('\r')) == Some(MANAGED_HEADER)
@@ -277,16 +327,32 @@ pub fn write_project_for(
     settings: &Settings,
     container: Option<&str>,
 ) -> Result<bool> {
+    let content = render_for(project, settings, container)?;
+    write_content(project, settings, &content)
+}
+
+/// Writes the front file of a project whose container sits behind an edge
+/// Traefik at `address:port`.
+pub fn write_project_via_edge(
+    project: &Project,
+    settings: &Settings,
+    address: &str,
+    port: u16,
+) -> Result<bool> {
+    let content = render_via_edge(project, settings, address, port)?;
+    write_content(project, settings, &content)
+}
+
+fn write_content(project: &Project, settings: &Settings, content: &str) -> Result<bool> {
     validate_slug(&project.slug)?;
     let dir = &traefik_settings(settings)?.dynamic_dir;
-    let content = render_for(project, settings, container)?;
     let path = dir.join(file_name(&project.slug));
 
     if let Some(existing) = read_optional(&path)? {
         if !has_header(&existing) {
             return Err(not_managed(&path));
         }
-        if existing == content {
+        if existing == *content {
             return Ok(false);
         }
     }
@@ -708,6 +774,49 @@ http:
         assert!(with_sub.contains("    zevo-shop_api:"), "{with_sub}");
         assert!(other.contains("    zevo-shop-api:"), "{other}");
         assert!(!with_sub.contains("zevo-shop-api:"));
+    }
+
+    #[test]
+    fn remote_projects_split_between_front_and_edge() {
+        let mut s = settings(Path::new("/x"));
+        s.traefik.as_mut().unwrap().entrypoint = "websecure".into();
+        s.traefik.as_mut().unwrap().tls = true;
+        let mut p = project(
+            "shop",
+            vec![
+                route(None, 3000),
+                route(Some("vite"), 5173),
+                route(Some("far"), 9000),
+            ],
+        );
+        p.routes[1].backend = Backend::Https;
+        p.routes[2].target = Target::HostPort {
+            address: "10.0.0.9".into(),
+        };
+
+        // Front: HTTPS for the browser, plain HTTP to the edge, and the
+        // fixed-address route untouched.
+        let front = render_via_edge(&p, &s, "192.168.1.20", 8480).unwrap();
+        assert_eq!(front.matches("tls: {}").count(), 3, "{front}");
+        assert_eq!(
+            front.matches("- url: http://192.168.1.20:8480").count(),
+            2,
+            "{front}"
+        );
+        assert!(front.contains("- url: http://10.0.0.9:9000"), "{front}");
+        assert!(!front.contains("serversTransport"), "{front}");
+
+        // Edge: no TLS, the real backends, and only the container routes.
+        let edge = render_edge(&p, &s, Some("vsc-shop-1")).unwrap();
+        assert!(
+            !edge.contains("tls: {}") && !edge.contains("websecure"),
+            "{edge}"
+        );
+        assert_eq!(edge.matches("- web").count(), 2, "{edge}");
+        assert!(edge.contains("- url: http://vsc-shop-1:3000"), "{edge}");
+        assert!(edge.contains("- url: https://vsc-shop-1:5173"), "{edge}");
+        assert!(edge.contains("serverName: vite.shop.localhost"), "{edge}");
+        assert!(!edge.contains("zevo-shop_far"), "{edge}");
     }
 
     #[test]

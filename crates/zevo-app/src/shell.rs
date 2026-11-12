@@ -27,6 +27,7 @@ use crate::Refresh;
 use crate::backend::{Backend, ProjectView, Snapshot};
 
 mod add;
+mod hosts;
 mod setup;
 
 const LOGO: &[u8] = include_bytes!("../../../assets/logo.svg");
@@ -39,6 +40,7 @@ enum Page {
     Traefik,
     Settings,
     Add,
+    Hosts,
 }
 
 pub struct Shell {
@@ -56,6 +58,7 @@ pub struct Shell {
     focus: FocusHandle,
     add: Option<add::AddForm>,
     setup: setup::SetupState,
+    host_form: Option<hosts::HostForm>,
     _search_changed: Subscription,
 }
 
@@ -86,6 +89,7 @@ impl Shell {
             focus: cx.focus_handle(),
             add: None,
             setup: setup::SetupState::default(),
+            host_form: None,
             _search_changed,
         };
         shell.reload(cx);
@@ -383,6 +387,14 @@ impl Shell {
                                 .on_click(cx.listener(|this, _, _, cx| this.go(Page::Traefik, cx))),
                         )
                         .child(
+                            SidebarMenuItem::new("Hosts")
+                                .icon(IconName::Network)
+                                .active(self.page == Page::Hosts)
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.open_hosts(window, cx)),
+                                ),
+                        )
+                        .child(
                             SidebarMenuItem::new("Settings")
                                 .icon(IconName::Settings)
                                 .active(self.page == Page::Settings)
@@ -592,24 +604,31 @@ impl Shell {
             }))
         };
 
-        // Devcontainers on this machine that are not registered, offered for adding.
-        let show_found = query.is_empty()
-            && filter.as_deref().is_none_or(|host| host == LOCAL_HOST_ID)
-            && !snapshot.discovered.is_empty();
+        // Devcontainers that are not registered, offered for adding: all of
+        // them, or only those on the host being looked at.
+        let discovered: Vec<_> = snapshot
+            .discovered
+            .iter()
+            .filter(|d| filter.as_ref().is_none_or(|host| &d.host == host))
+            .collect();
+        let show_found = query.is_empty() && !discovered.is_empty();
         let found = show_found.then(|| {
             v_flex()
                 .px_4()
                 .pt_6()
                 .pb_4()
-                .child(caption("Found on this machine", cx))
+                .child(caption("Found, not in Zevo yet", cx))
                 .child(
                     div()
                         .pb_2()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child("Devcontainers that are not in Zevo yet."),
+                        .child(
+                            "Devcontainers on this machine and your hosts that are not registered.",
+                        ),
                 )
-                .children(snapshot.discovered.iter().enumerate().map(|(ix, d)| {
+                .children(discovered.into_iter().enumerate().map(|(ix, d)| {
+                    let host = d.host.clone();
                     let folder = d.folder.to_string_lossy().into_owned();
                     let name = d
                         .folder
@@ -643,13 +662,14 @@ impl Shell {
                                         .text_color(cx.theme().muted_foreground),
                                 ),
                         )
+                        .child(div().w(px(120.)).child(host_label(&d.host)))
                         .child(
                             Button::new(("add-found", ix))
                                 .small()
                                 .icon(IconName::Plus)
                                 .label("Add")
                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.open_add_for(folder.clone(), window, cx)
+                                    this.open_add_for(host.clone(), folder.clone(), window, cx)
                                 })),
                         )
                 }))
@@ -1234,6 +1254,7 @@ impl Render for Shell {
             }
             Page::Traefik => self.render_traefik(&snapshot, cx),
             Page::Settings => self.render_settings(&snapshot, cx),
+            Page::Hosts => self.render_hosts(&snapshot, cx),
         };
 
         let banners = v_flex()

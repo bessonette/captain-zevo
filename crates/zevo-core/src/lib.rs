@@ -12,6 +12,7 @@ pub mod model;
 pub mod programs;
 pub mod reconcile;
 pub mod register;
+pub mod remote;
 pub mod runtime;
 pub mod setup;
 pub mod store;

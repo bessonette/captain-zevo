@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::model::{Project, Settings, validate_slug};
+use crate::model::{Host, Project, Settings, validate_slug};
 use crate::{Error, Result};
 
 /// Overrides the config directory (used by tests and portable installs).
@@ -114,6 +114,75 @@ impl Store {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 Err(Error::UnknownProject(slug.to_string()))
+            }
+            Err(e) => Err(Error::io(format!("removing {}", path.display()), e)),
+        }
+    }
+}
+
+impl Store {
+    fn hosts_dir(&self) -> PathBuf {
+        self.dir.join("hosts")
+    }
+
+    fn host_path(&self, id: &str) -> PathBuf {
+        self.hosts_dir().join(format!("{id}.toml"))
+    }
+
+    /// Remote hosts, sorted by id. This machine is not in the list.
+    pub fn hosts(&self) -> Result<Vec<Host>> {
+        let dir = self.hosts_dir();
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(Error::io(format!("reading {}", dir.display()), e)),
+        };
+        let mut hosts = Vec::new();
+        for entry in entries {
+            let path = entry
+                .map_err(|e| Error::io(format!("reading {}", dir.display()), e))?
+                .path();
+            if path.extension().is_some_and(|ext| ext == "toml")
+                && let Some(host) = read_toml::<Host>(&path)?
+            {
+                hosts.push(host);
+            }
+        }
+        hosts.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(hosts)
+    }
+
+    pub fn host(&self, id: &str) -> Result<Host> {
+        validate_slug(id)?;
+        read_toml(&self.host_path(id))?
+            .ok_or_else(|| Error::Other(format!("host '{id}' is not registered")))
+    }
+
+    pub fn add_host(&self, host: &Host) -> Result<()> {
+        validate_slug(&host.id)?;
+        if self.host_path(&host.id).exists() {
+            return Err(Error::Other(format!(
+                "host '{}' is already registered",
+                host.id
+            )));
+        }
+        write_toml(&self.host_path(&host.id), host)
+    }
+
+    /// Removes a host that no project uses.
+    pub fn remove_host(&self, id: &str) -> Result<()> {
+        validate_slug(id)?;
+        if let Some(project) = self.projects()?.iter().find(|p| p.host == id) {
+            return Err(Error::Other(format!(
+                "host '{id}' is still used by project '{}'; remove that first",
+                project.slug
+            )));
+        }
+        let path = self.host_path(id);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(Error::Other(format!("host '{id}' is not registered")))
             }
             Err(e) => Err(Error::io(format!("removing {}", path.display()), e)),
         }
@@ -263,6 +332,27 @@ mod tests {
             store.save_project(&project("nope")),
             Err(Error::UnknownProject(_))
         ));
+    }
+
+    #[test]
+    fn host_lifecycle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path());
+        assert!(store.hosts().unwrap().is_empty());
+        let host = Host::from_ssh("dev@10.0.0.5", Some("buildbox"), None).unwrap();
+        store.add_host(&host).unwrap();
+        assert!(store.add_host(&host).is_err());
+        assert_eq!(store.hosts().unwrap(), std::slice::from_ref(&host));
+        assert_eq!(store.host("buildbox").unwrap(), host);
+
+        // A host with projects cannot be removed.
+        let mut p = project("shop");
+        p.host = "buildbox".into();
+        store.add_project(&p).unwrap();
+        assert!(store.remove_host("buildbox").is_err());
+        store.remove_project("shop").unwrap();
+        store.remove_host("buildbox").unwrap();
+        assert!(store.host("buildbox").is_err());
     }
 
     #[test]

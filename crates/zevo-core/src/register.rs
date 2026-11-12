@@ -1,11 +1,11 @@
 //! Registering, editing and removing projects. Shared by the CLI and the app
 //! so both apply the same checks.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::model::{LOCAL_HOST_ID, Project, Route, Target, slugify, validate_slug};
+use crate::model::{Host, LOCAL_HOST_ID, Project, Route, Target, slugify, validate_slug};
 use crate::store::Store;
-use crate::{Error, Result, devcontainer, traefik};
+use crate::{Error, Result, devcontainer, remote, traefik};
 
 /// Inspects a folder and proposes a project for it: name and slug from the
 /// devcontainer config or folder name, and a route for the first port found.
@@ -18,6 +18,31 @@ pub fn draft(folder: &Path) -> Result<Project> {
         return Err(Error::Other(format!("{} is not a folder", path.display())));
     }
     let detected = devcontainer::detect(&path)?;
+    Ok(build_draft(LOCAL_HOST_ID, path, detected))
+}
+
+/// Like [`draft`], for a folder on a remote host. Its devcontainer.json is
+/// read over SSH.
+pub fn draft_remote(host: &Host, folder: &str) -> Result<Project> {
+    let folder = folder.trim().trim_end_matches('/');
+    if !folder.starts_with('/') || folder.chars().any(char::is_control) {
+        return Err(Error::Other(format!(
+            "'{folder}' must be the full path of the folder on {}",
+            host.name
+        )));
+    }
+    let mut detected = devcontainer::Detected::default();
+    for candidate in [".devcontainer/devcontainer.json", ".devcontainer.json"] {
+        let config_path = format!("{folder}/{candidate}");
+        if let Some(text) = remote::read_file(host, &config_path)? {
+            detected = devcontainer::detect_text(Path::new(&config_path), &text)?;
+            break;
+        }
+    }
+    Ok(build_draft(&host.id, PathBuf::from(folder), detected))
+}
+
+fn build_draft(host: &str, path: PathBuf, detected: devcontainer::Detected) -> Project {
     let folder_name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -25,10 +50,10 @@ pub fn draft(folder: &Path) -> Result<Project> {
 
     // A project that declares itself wins over guesses from its ports.
     if let Some(declared) = detected.declared {
-        return Ok(Project {
+        return Project {
             slug: declared.slug.unwrap_or_else(|| slugify(&folder_name)),
             name: declared.name.or(detected.name).unwrap_or(folder_name),
-            host: LOCAL_HOST_ID.to_string(),
+            host: host.to_string(),
             path,
             kind: detected.kind,
             service: detected.service,
@@ -37,7 +62,7 @@ pub fn draft(folder: &Path) -> Result<Project> {
             declared: true,
             address: None,
             env_file: declared.env_file,
-        });
+        };
     }
 
     let routes = detected
@@ -53,10 +78,10 @@ pub fn draft(folder: &Path) -> Result<Project> {
         })
         .into_iter()
         .collect();
-    Ok(Project {
+    Project {
         slug: slugify(&folder_name),
         name: detected.name.unwrap_or(folder_name),
-        host: LOCAL_HOST_ID.to_string(),
+        host: host.to_string(),
         path,
         kind: detected.kind,
         service: detected.service,
@@ -65,7 +90,7 @@ pub fn draft(folder: &Path) -> Result<Project> {
         declared: false,
         address: None,
         env_file: None,
-    })
+    }
 }
 
 /// Points every route of a declared project at `address`, or back at the
@@ -135,6 +160,9 @@ fn validate(store: &Store, project: &Project) -> Result<()> {
         return Err(Error::NotSetUp);
     }
     validate_slug(&project.slug)?;
+    if project.host != LOCAL_HOST_ID {
+        store.host(&project.host)?;
+    }
     if project.name.trim().is_empty() {
         return Err(Error::Other("the project needs a name".into()));
     }
