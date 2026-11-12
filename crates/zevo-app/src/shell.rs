@@ -1603,7 +1603,7 @@ impl Render for Shell {
                                     .left(px(-58.))
                                     .bottom(px(34.))
                                     .size(px(300.))
-                                    .text_color(cx.theme().foreground.opacity(0.055))
+                                    .text_color(cx.theme().foreground.opacity(0.045))
                                     .with_transformation(Transformation::rotate(radians(-0.26))),
                             ),
                     )
