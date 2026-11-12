@@ -487,6 +487,14 @@ fn print_projects(report: &Report) {
             ContainerState::Unknown => "unknown",
         };
         println!("{:<20} {:<24} {}", p.slug, state, p.urls.join("  "));
+        for (url, backend) in p.urls.iter().zip(&p.backends) {
+            if *backend == zevo_core::health::Listening::LoopbackOnly {
+                println!(
+                    "  ! {url}: the app listens only on 127.0.0.1 inside the container, so \
+                     Traefik cannot reach it. Start it on 0.0.0.0."
+                );
+            }
+        }
     }
     print_warnings(report);
 }

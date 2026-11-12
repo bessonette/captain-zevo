@@ -18,6 +18,8 @@ struct State {
     networks: Vec<String>,
     /// When set, every call fails with this message.
     down: Option<String>,
+    /// Container name to what `exec` prints in it.
+    exec_output: std::collections::BTreeMap<String, String>,
 }
 
 impl FakeRuntime {
@@ -49,6 +51,15 @@ impl FakeRuntime {
 
     pub fn networks(&self) -> Vec<String> {
         self.state.lock().unwrap().networks.clone()
+    }
+
+    /// Sets what any command run in the container prints.
+    pub fn set_exec_output(&self, container: &str, output: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .exec_output
+            .insert(container.to_string(), output.to_string());
     }
 
     /// Makes every later call fail, as if the daemon were unreachable.
@@ -111,6 +122,16 @@ impl Runtime for FakeRuntime {
         self.with(|s| {
             find(s, container)?.networks.remove(network);
             Ok(())
+        })
+    }
+
+    async fn exec(&self, container: &str, _command: &[&str]) -> Result<String> {
+        self.with(|s| {
+            let name = find(s, container)?.name.clone();
+            s.exec_output
+                .get(&name)
+                .cloned()
+                .ok_or_else(|| Error::Runtime(format!("cannot run commands in {name}")))
         })
     }
 

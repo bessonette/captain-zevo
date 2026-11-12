@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use zevo_core::certs::{self, Issuer as _};
+use zevo_core::health::Listening;
 use zevo_core::model::{
     DevcontainerKind, LOCAL_HOST_ID, Project, Route, Settings, Target, TraefikMode, TraefikSettings,
 };
@@ -117,6 +118,7 @@ impl Backend for SystemBackend {
                 state: ContainerState::Unknown,
                 attached: false,
                 urls: reconcile::urls(p, &snapshot.settings),
+                backends: vec![Listening::Unknown; p.routes.len()],
             };
 
             let statuses = match &snapshot.settings.traefik {
@@ -407,6 +409,17 @@ impl Backend for DemoBackend {
                         // "docs" shows the running-but-unattached case.
                         attached: *state == ContainerState::Running && project.slug != "docs",
                         urls: reconcile::urls(project, &settings),
+                        // Example states: one server bound to loopback only.
+                        backends: project
+                            .routes
+                            .iter()
+                            .map(|r| match (state, r.port) {
+                                (ContainerState::Running, 8080) => Listening::LoopbackOnly,
+                                (ContainerState::Running, 4321) => Listening::No,
+                                (ContainerState::Running, _) => Listening::Yes,
+                                _ => Listening::Unknown,
+                            })
+                            .collect(),
                     },
                     yaml: traefik::render(project, &settings).unwrap_or_default(),
                     project: project.clone(),

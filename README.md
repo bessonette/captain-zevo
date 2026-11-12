@@ -32,6 +32,9 @@ published ports, no port conflicts.
 - Zevo finds a project's container by the labels the devcontainer tooling sets,
   so nothing in your repository changes. `zevo reconcile --watch` re-attaches
   containers after a rebuild.
+- Zevo checks, inside each container, whether a route's port is listening where
+  Traefik can reach it, and says so when a dev server is bound to 127.0.0.1
+  only.
 - Projects that cannot join the network (another machine, a Traefik that runs
   outside Docker) use a fixed address instead: `--address <host>`.
 

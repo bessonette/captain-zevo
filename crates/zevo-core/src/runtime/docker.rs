@@ -228,6 +228,36 @@ impl Runtime for DockerRuntime {
             .map_err(err)
     }
 
+    async fn exec(&self, container: &str, command: &[&str]) -> Result<String> {
+        use bollard::container::LogOutput;
+        use bollard::exec::{CreateExecOptions, StartExecResults};
+
+        let exec = self
+            .docker
+            .create_exec(
+                container,
+                CreateExecOptions {
+                    attach_stdout: Some(true),
+                    cmd: Some(command.to_vec()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(err)?;
+        let StartExecResults::Attached { mut output, .. } =
+            self.docker.start_exec(&exec.id, None).await.map_err(err)?
+        else {
+            return Err(Error::Runtime("the command did not attach".into()));
+        };
+        let mut printed = Vec::new();
+        while let Some(chunk) = output.try_next().await.map_err(err)? {
+            if let LogOutput::StdOut { message } = chunk {
+                printed.extend_from_slice(&message);
+            }
+        }
+        Ok(String::from_utf8_lossy(&printed).into_owned())
+    }
+
     async fn run_traefik(&self, spec: &TraefikSpec) -> Result<()> {
         let pull = CreateImageOptionsBuilder::default()
             .from_image(&spec.image)

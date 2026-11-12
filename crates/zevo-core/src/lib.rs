@@ -5,6 +5,7 @@ pub mod certs;
 pub mod devcontainer;
 pub mod doctor;
 pub mod error;
+pub mod health;
 pub mod model;
 pub mod reconcile;
 pub mod register;

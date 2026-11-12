@@ -5,6 +5,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use crate::health::{self, Listening};
 use crate::model::{LOCAL_HOST_ID, Project, Settings, Target};
 use crate::runtime::{ContainerInfo, Runtime};
 use crate::store::Store;
@@ -40,6 +41,8 @@ pub struct ProjectStatus {
     /// Whether the container is on the shared network under the project alias.
     pub attached: bool,
     pub urls: Vec<String>,
+    /// Per route, in order: is its app listening where Traefik can reach it?
+    pub backends: Vec<Listening>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -165,6 +168,7 @@ pub async fn reconcile_with(
             state: ContainerState::Unknown,
             attached: false,
             urls: urls(project, &settings),
+            backends: vec![Listening::Unknown; project.routes.len()],
         };
         if project.host != LOCAL_HOST_ID {
             if project.routes.iter().any(|r| r.target == Target::Container) {
@@ -196,6 +200,18 @@ pub async fn reconcile_with(
                                 });
                             }
                             Err(e) => report.warnings.push(format!("{}: {e}", project.slug)),
+                        }
+                    }
+                    if c.running && needs_network(project) {
+                        // Failing to look is not worth a warning; the routes
+                        // just stay unchecked.
+                        if let Ok(table) = runtime.exec(&c.id, health::COMMAND).await {
+                            let ports = health::parse(&table);
+                            for (route, state) in project.routes.iter().zip(&mut status.backends) {
+                                if route.target == Target::Container {
+                                    *state = health::port_state(&ports, route.port);
+                                }
+                            }
                         }
                     }
                 }
@@ -493,6 +509,50 @@ mod tests {
         );
         assert_eq!(report.projects[0].state, ContainerState::Unknown);
         assert!(report.warnings[0].contains("cannot connect"));
+    }
+
+    #[tokio::test]
+    async fn reports_whether_each_route_is_reachable() {
+        let (_tmp, store, rt) = set_up().await;
+        let mut p = project("shop", "/work/shop");
+        p.routes.push(Route {
+            subdomain: Some("api".into()),
+            port: 8000,
+            ..p.routes[0].clone()
+        });
+        p.routes.push(Route {
+            subdomain: Some("docs".into()),
+            port: 4000,
+            ..p.routes[0].clone()
+        });
+        p.routes.push(Route {
+            subdomain: Some("far".into()),
+            target: Target::HostPort {
+                address: "10.0.0.9".into(),
+            },
+            ..p.routes[0].clone()
+        });
+        store.add_project(&p).unwrap();
+        rt.add_container(devcontainer("vsc-shop", "/work/shop"));
+
+        // Before the container can be inspected, nothing is claimed.
+        let report = reconcile(&store, Some(&rt)).await.unwrap();
+        assert_eq!(report.projects[0].backends, [Listening::Unknown; 4]);
+
+        rt.set_exec_output(
+            "vsc-shop",
+            "   0: 00000000:0BB8 00000000:0000 0A\n   1: 0100007F:1F40 00000000:0000 0A\n",
+        );
+        let report = reconcile(&store, Some(&rt)).await.unwrap();
+        assert_eq!(
+            report.projects[0].backends,
+            [
+                Listening::Yes,
+                Listening::LoopbackOnly,
+                Listening::No,
+                Listening::Unknown
+            ]
+        );
     }
 
     #[tokio::test]

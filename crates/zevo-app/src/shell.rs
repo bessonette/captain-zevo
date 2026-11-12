@@ -19,6 +19,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use zevo_core::health::Listening;
 use zevo_core::model::{LOCAL_HOST_ID, Target};
 use zevo_core::reconcile::ContainerState;
 
@@ -645,9 +646,26 @@ impl Shell {
                     )),
                     _ => None,
                 };
+                let loopback: Vec<String> = p
+                    .routes
+                    .iter()
+                    .zip(&view.status.backends)
+                    .filter(|(_, b)| **b == Listening::LoopbackOnly)
+                    .map(|(r, _)| r.port.to_string())
+                    .collect();
                 v_flex()
                     .gap_5()
                     .children(notice)
+                    .when(!loopback.is_empty(), |col| {
+                        col.child(Alert::warning(
+                            "loopback",
+                            format!(
+                                "Port {} listens only on 127.0.0.1 inside the container, so Traefik cannot reach it. \
+                                 Start that server on 0.0.0.0 (dev servers usually have a --host 0.0.0.0 option).",
+                                loopback.join(", ")
+                            ),
+                        ))
+                    })
                     .child(
                         v_flex()
                             .gap_2()
@@ -712,6 +730,7 @@ impl Shell {
                         .child(caption("Sends to", cx).flex_1())
                         .child(caption("Port", cx).w(px(70.)))
                         .child(caption("Path", cx).w(px(90.)))
+                        .child(caption("App", cx).w(px(150.)))
                         .child(div().w(px(32.))),
                 )
                 .children(p.routes.iter().enumerate().map(|(ix, r)| {
@@ -741,6 +760,19 @@ impl Shell {
                             mono(r.path_prefix.clone().unwrap_or_else(|| "/".into()), cx)
                                 .w(px(90.)),
                         )
+                        .child({
+                            let (color, label) = match view.status.backends.get(ix) {
+                                Some(Listening::Yes) => (cx.theme().success, "Listening"),
+                                Some(Listening::LoopbackOnly) => (cx.theme().warning, "Only on 127.0.0.1"),
+                                Some(Listening::No) => (cx.theme().muted_foreground, "Not listening"),
+                                _ => (cx.theme().muted_foreground, "Not checked"),
+                            };
+                            h_flex()
+                                .w(px(150.))
+                                .gap_1p5()
+                                .child(div().size(px(6.)).rounded_full().bg(color))
+                                .child(div().text_sm().child(label))
+                        })
                         .child(div().w(px(32.)).when(!p.declared, |cell| {
                             cell.child(
                                 Button::new(("remove-route", ix))

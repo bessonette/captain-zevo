@@ -88,6 +88,8 @@ pub trait Runtime: Send + Sync {
     async fn ensure_network(&self, name: &str) -> Result<bool>;
     async fn connect(&self, container: &str, network: &str, aliases: &[String]) -> Result<()>;
     async fn disconnect(&self, container: &str, network: &str) -> Result<()>;
+    /// Runs a command in a running container and returns what it printed.
+    async fn exec(&self, container: &str, command: &[&str]) -> Result<String>;
     /// Pulls the image if needed, then creates and starts the Traefik container.
     async fn run_traefik(&self, spec: &TraefikSpec) -> Result<()>;
 }
