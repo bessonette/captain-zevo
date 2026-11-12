@@ -314,7 +314,7 @@ impl Backend for SystemBackend {
                         Some(host) => traefik::render_via_edge(
                             &project,
                             &snapshot.settings,
-                            &host.address,
+                            &remote::routable_address(&host.address),
                             host.edge_port,
                         ),
                         None => traefik::render_for(
@@ -371,6 +371,7 @@ impl Backend for SystemBackend {
                 ssh,
                 Some(name),
                 Some(address),
+                None,
             ))
             .map(|_| ())
             .map_err(|e| e.to_string())

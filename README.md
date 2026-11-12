@@ -135,6 +135,12 @@ zevo add --host buildbox /srv/dev/billing
 ```
 
 - SSH must work without typing (keys or an agent); Zevo never prompts.
+- Zevo finds the Docker socket on the remote wherever its runtime puts it
+  (Docker Engine, Docker Desktop, OrbStack, Colima, Rancher Desktop, rootless
+  Docker, Podman). Pass `--docker-socket <path>` if yours is somewhere else.
+- A host's address can be a name, such as a Tailscale name or `box.local`.
+  Zevo looks up its current IP on every reconcile, so routes follow the
+  machine when its IP changes.
 - The remote needs only Docker. Zevo talks to it by forwarding its Docker
   socket over SSH, and starts one container there, `zevo-edge`: a small
   Traefik listening on port 8480 that routes to that machine's project

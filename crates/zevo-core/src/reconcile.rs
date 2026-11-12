@@ -325,6 +325,7 @@ pub async fn reconcile_hosts(
         }
     }
 
+    let mut routable: std::collections::BTreeMap<String, String> = Default::default();
     let mut issuer_ready: Option<std::result::Result<(), String>> = None;
     let mut uncertified: Option<String> = None;
     for project in &projects {
@@ -434,7 +435,11 @@ pub async fn reconcile_hosts(
         let wrote = match known_host {
             // Remote: this machine's Traefik hands over to the host's edge.
             Some(host) => {
-                traefik::write_project_via_edge(project, &settings, &host.address, host.edge_port)
+                // Looked up once per host and pass: the name's current IP.
+                let address = routable
+                    .entry(host.id.clone())
+                    .or_insert_with(|| crate::remote::routable_address(&host.address));
+                traefik::write_project_via_edge(project, &settings, address, host.edge_port)
             }
             None => traefik::write_project_for(project, &settings, status.container.as_deref()),
         };

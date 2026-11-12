@@ -164,9 +164,13 @@ enum HostCommand {
         /// Display name (default: the address).
         #[arg(long)]
         name: Option<String>,
-        /// Address this machine's Traefik uses to reach it, if different.
+        /// Address this machine's Traefik uses to reach it, if different. A
+        /// name is fine: Zevo looks up its current IP on every reconcile.
         #[arg(long)]
         address: Option<String>,
+        /// Path of the Docker socket there, if Zevo cannot find it.
+        #[arg(long)]
+        docker_socket: Option<String>,
     },
     /// List hosts and whether Docker answers on each.
     Ls,
@@ -389,13 +393,27 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
         }
         Command::Host { command } => match command {
-            HostCommand::Add { ssh, name, address } => {
-                let (host, version) =
-                    remote::register_host(&store, &ssh, name.as_deref(), address.as_deref())
-                        .await?;
+            HostCommand::Add {
+                ssh,
+                name,
+                address,
+                docker_socket,
+            } => {
+                let (host, version) = remote::register_host(
+                    &store,
+                    &ssh,
+                    name.as_deref(),
+                    address.as_deref(),
+                    docker_socket.as_deref(),
+                )
+                .await?;
                 println!(
                     "Added host '{}' ({version}), routed at {}.",
                     host.id, host.address
+                );
+                println!(
+                    "Docker socket there: {}",
+                    host.docker_socket.as_deref().unwrap_or("default")
                 );
                 println!(
                     "Add its projects with: zevo add --host {} <folder on that machine>",
