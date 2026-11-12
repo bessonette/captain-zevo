@@ -27,6 +27,8 @@ pub struct Candidate {
     pub tls: bool,
     /// Network Traefik already shares with containers, if it has one.
     pub network: Option<String>,
+    /// The file-provider directory as Traefik sees it inside its container.
+    pub container_dir: Option<String>,
     /// Reasons this Traefik cannot be adopted as is.
     pub problems: Vec<String>,
 }
@@ -95,6 +97,7 @@ fn inspect(c: &ContainerInfo) -> Candidate {
             entrypoint: None,
             http_port: None,
             tls: false,
+            container_dir: None,
             network: None,
             problems,
         };
@@ -137,6 +140,13 @@ fn inspect(c: &ContainerInfo) -> Candidate {
             .entrypoints
             .iter()
             .find(|(n, _)| n.eq_ignore_ascii_case(to))
+            // `to` may be a port (":8443") instead of a name.
+            .or_else(|| {
+                config
+                    .entrypoints
+                    .iter()
+                    .find(|(_, port)| to.starts_with(':') && *port == 443)
+            })
     {
         entry = Some(target);
         tls = true;
@@ -187,6 +197,7 @@ fn inspect(c: &ContainerInfo) -> Candidate {
         entrypoint: entry.map(|(name, _)| name.clone()),
         http_port,
         tls,
+        container_dir: config.file_dir.clone(),
         network,
         problems,
     }
@@ -409,6 +420,7 @@ pub async fn adopt(
     attach_traefik(runtime, &candidate.container, &settings.network).await?;
     settings.traefik = Some(TraefikSettings {
         tls: candidate.tls,
+        container_dir: candidate.container_dir.clone(),
         mode: TraefikMode::Adopted,
         container: Some(candidate.container.clone()),
         dynamic_dir: dynamic_dir.clone(),
@@ -437,6 +449,7 @@ pub fn adopt_manual(
     let mut settings = store.settings()?;
     settings.traefik = Some(TraefikSettings {
         tls,
+        container_dir: None,
         mode: TraefikMode::Adopted,
         container: None,
         dynamic_dir: dynamic_dir.to_path_buf(),
@@ -453,14 +466,23 @@ pub async fn bootstrap(
     store: &Store,
     runtime: &dyn Runtime,
     http_port: Option<u16>,
+    https: bool,
 ) -> Result<Settings> {
     let mut settings = store.settings()?;
+    let free = |preferred: u16, fallback: std::ops::Range<u16>| {
+        std::iter::once(preferred)
+            .chain(fallback)
+            .find(|port| !port_in_use(*port))
+            .ok_or_else(|| Error::Other("no free port found; pass --port".into()))
+    };
     let http_port = match http_port {
         Some(port) => port,
-        None => std::iter::once(80)
-            .chain(8080..8100)
-            .find(|port| !port_in_use(*port))
-            .ok_or_else(|| Error::Other("no free HTTP port found; pass --port".into()))?,
+        None => free(80, 8080..8100)?,
+    };
+    let https_port = if https {
+        Some(free(443, 8443..8463)?)
+    } else {
+        None
     };
     let dynamic_dir = store.managed_dynamic_dir();
     std::fs::create_dir_all(&dynamic_dir)
@@ -474,16 +496,23 @@ pub async fn bootstrap(
             network: settings.network.clone(),
             dynamic_dir: dynamic_dir.clone(),
             http_port,
+            https_port,
         })
         .await?;
 
     settings.traefik = Some(TraefikSettings {
-        tls: false,
+        tls: https_port.is_some(),
+        container_dir: Some("/etc/traefik/dynamic".to_string()),
         mode: TraefikMode::Managed,
         container: Some(MANAGED_CONTAINER.to_string()),
         dynamic_dir,
-        entrypoint: "web".to_string(),
-        http_port,
+        entrypoint: if https_port.is_some() {
+            "websecure"
+        } else {
+            "web"
+        }
+        .to_string(),
+        http_port: https_port.unwrap_or(http_port),
     });
     store.save_settings(&settings)?;
     Ok(settings)
@@ -695,12 +724,34 @@ providers:
     }
 
     #[tokio::test]
+    async fn bootstrap_with_https_redirects_and_is_detected_as_tls() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path());
+        let rt = FakeRuntime::new();
+
+        let settings = bootstrap(&store, &rt, Some(8089), true).await.unwrap();
+        let traefik = settings.traefik.unwrap();
+        assert!(traefik.tls);
+        assert_eq!(traefik.entrypoint, "websecure");
+        assert_eq!(
+            traefik.container_dir.as_deref(),
+            Some("/etc/traefik/dynamic")
+        );
+        let https_port = traefik.http_port;
+
+        // Detecting it again reads the same picture back from its arguments.
+        let found = find_traefik(&rt).await.unwrap();
+        assert_eq!(found[0].entrypoint.as_deref(), Some("websecure"));
+        assert_eq!((found[0].http_port, found[0].tls), (Some(https_port), true));
+    }
+
+    #[tokio::test]
     async fn bootstrap_starts_a_managed_traefik() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::open(tmp.path());
         let rt = FakeRuntime::new();
 
-        let settings = bootstrap(&store, &rt, Some(8088)).await.unwrap();
+        let settings = bootstrap(&store, &rt, Some(8088), false).await.unwrap();
         let traefik = settings.traefik.unwrap();
         assert_eq!(traefik.mode, TraefikMode::Managed);
         assert_eq!(traefik.http_port, 8088);

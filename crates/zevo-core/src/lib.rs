@@ -1,6 +1,7 @@
 //! Core logic for Captain Zevo: project registry, Traefik config generation,
 //! container runtime access and reconciliation. No UI dependencies.
 
+pub mod certs;
 pub mod devcontainer;
 pub mod doctor;
 pub mod error;

@@ -181,27 +181,38 @@ impl Runtime for DockerRuntime {
             .map_err(err)?;
 
         let dynamic_dir = spec.dynamic_dir.to_string_lossy();
+        // (container port, host port)
+        let mut ports = vec![(80u16, spec.http_port)];
+        ports.extend(spec.https_port.map(|port| (443, port)));
         let body = ContainerCreateBody {
             image: Some(spec.image.clone()),
-            cmd: Some(vec![
-                "--providers.file.directory=/etc/traefik/dynamic".to_string(),
-                "--providers.file.watch=true".to_string(),
-                "--entrypoints.web.address=:80".to_string(),
-            ]),
+            cmd: Some(spec.args()),
             labels: Some(HashMap::from([(
                 "dev.captain-zevo.managed".to_string(),
                 "true".to_string(),
             )])),
-            exposed_ports: Some(vec!["80/tcp".to_string()]),
+            exposed_ports: Some(
+                ports
+                    .iter()
+                    .map(|(inner, _)| format!("{inner}/tcp"))
+                    .collect(),
+            ),
             host_config: Some(HostConfig {
                 binds: Some(vec![format!("{dynamic_dir}:/etc/traefik/dynamic:ro")]),
-                port_bindings: Some(HashMap::from([(
-                    "80/tcp".to_string(),
-                    Some(vec![PortBinding {
-                        host_ip: None,
-                        host_port: Some(spec.http_port.to_string()),
-                    }]),
-                )])),
+                port_bindings: Some(
+                    ports
+                        .iter()
+                        .map(|(inner, host)| {
+                            (
+                                format!("{inner}/tcp"),
+                                Some(vec![PortBinding {
+                                    host_ip: None,
+                                    host_port: Some(host.to_string()),
+                                }]),
+                            )
+                        })
+                        .collect(),
+                ),
                 restart_policy: Some(RestartPolicy {
                     name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
                     maximum_retry_count: None,

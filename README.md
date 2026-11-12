@@ -21,8 +21,13 @@ published ports, no port conflicts.
 - Project containers share a Docker network with Traefik, which reaches them
   by container name. Zevo reuses the network your Traefik already has, or
   creates one called `zevo`. Containers already on it are left untouched.
+- Addresses are HTTPS wherever possible. Zevo creates a certificate per project
+  with [mkcert](https://github.com/FiloSottile/mkcert) (install it and run
+  `mkcert -install` once), keeps it in a `zevo-certs` folder inside the route
+  directory, and lists it in the project's route file. Without mkcert, routes
+  are still written and Zevo tells you what to install.
 - If your Traefik redirects HTTP to HTTPS, Zevo detects that and writes HTTPS
-  routes. A route can also talk HTTPS to the app behind it
+  routes. A Traefik that Zevo starts itself listens on 443 and redirects 80. A route can also talk HTTPS to the app behind it
   (`backend = "https"`), for dev servers with self-signed certificates.
 - Zevo finds a project's container by the labels the devcontainer tooling sets,
   so nothing in your repository changes. `zevo reconcile --watch` re-attaches
@@ -34,6 +39,8 @@ published ports, no port conflicts.
 
 - A Docker-compatible runtime: Docker Engine, Docker Desktop, Podman, OrbStack,
   Colima or Rancher Desktop.
+- [mkcert](https://github.com/FiloSottile/mkcert) for HTTPS addresses
+  (optional, recommended).
 - Rust 1.90 or newer to build from source.
 
 A running Traefik is not required. `zevo setup` adopts one if it finds it, and

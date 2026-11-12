@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
+use zevo_core::certs::{self, Issuer as _};
 use zevo_core::model::{Route, Target};
 use zevo_core::reconcile::{self, Action, ContainerState, Report};
 use zevo_core::runtime::{DockerRuntime, Runtime};
@@ -343,7 +344,17 @@ async fn cmd_setup(store: &Store, args: SetupArgs) -> Result<()> {
                 "Starting Traefik container '{}'...",
                 setup::MANAGED_CONTAINER
             );
-            setup::bootstrap(store, &runtime, args.port).await?
+            {
+                // HTTPS needs locally trusted certificates; without mkcert, use HTTP.
+                let https = match certs::Mkcert.ready() {
+                    Ok(()) => true,
+                    Err(reason) => {
+                        eprintln!("warning: starting Traefik without HTTPS. {reason}");
+                        false
+                    }
+                };
+                setup::bootstrap(store, &runtime, args.port, https).await?
+            }
         }
     };
     let traefik = settings
@@ -479,6 +490,7 @@ fn print_actions_only(report: &Report) {
             Action::AttachedProject { slug, container } => {
                 println!("attached {slug} ({container})")
             }
+            Action::IssuedCertificate { slug } => println!("created HTTPS certificate for {slug}"),
         }
     }
 }

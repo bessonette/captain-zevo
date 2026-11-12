@@ -52,6 +52,30 @@ pub struct TraefikSpec {
     pub dynamic_dir: PathBuf,
     /// Host port published for the `web` entrypoint.
     pub http_port: u16,
+    /// Host port for the HTTPS `websecure` entrypoint. When set, `web`
+    /// redirects everything to it.
+    pub https_port: Option<u16>,
+}
+
+impl TraefikSpec {
+    /// Command-line arguments for the Traefik container.
+    pub fn args(&self) -> Vec<String> {
+        let mut args = vec![
+            "--providers.file.directory=/etc/traefik/dynamic".to_string(),
+            "--providers.file.watch=true".to_string(),
+            "--entrypoints.web.address=:80".to_string(),
+        ];
+        if let Some(port) = self.https_port {
+            args.extend([
+                "--entrypoints.websecure.address=:443".to_string(),
+                // A port rather than the entrypoint name, so the redirect is
+                // right even when 443 is published on another host port.
+                format!("--entrypoints.web.http.redirections.entrypoint.to=:{port}"),
+                "--entrypoints.web.http.redirections.entrypoint.scheme=https".to_string(),
+            ]);
+        }
+        args
+    }
 }
 
 #[async_trait]

@@ -206,6 +206,7 @@ mod tests {
         let settings = Settings {
             traefik: Some(TraefikSettings {
                 tls: false,
+                container_dir: None,
                 mode: TraefikMode::Managed,
                 container: Some("zevo-traefik".into()),
                 dynamic_dir: store.managed_dynamic_dir(),

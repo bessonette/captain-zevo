@@ -64,6 +64,25 @@ pub struct TraefikSettings {
     /// Whether that entrypoint serves HTTPS (routes then get `tls: {}`).
     #[serde(default)]
     pub tls: bool,
+    /// The file-provider directory as Traefik itself sees it, when that
+    /// differs from `dynamic_dir` (Traefik in a container). Needed to tell
+    /// Traefik where certificates are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_dir: Option<String>,
+}
+
+impl TraefikSettings {
+    /// Path of a file in the route directory, as Traefik sees it.
+    pub fn path_in_traefik(&self, relative: &str) -> String {
+        match &self.container_dir {
+            Some(dir) => format!("{}/{relative}", dir.trim_end_matches('/')),
+            None => self
+                .dynamic_dir
+                .join(relative)
+                .to_string_lossy()
+                .into_owned(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

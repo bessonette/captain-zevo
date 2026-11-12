@@ -8,7 +8,7 @@ use serde::Serialize;
 use crate::model::{LOCAL_HOST_ID, Project, Settings, Target};
 use crate::runtime::{ContainerInfo, Runtime};
 use crate::store::Store;
-use crate::{Error, Result, register, setup, traefik};
+use crate::{Error, Result, certs, register, setup, traefik};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
@@ -18,6 +18,7 @@ pub enum Action {
     CreatedNetwork { network: String },
     AttachedTraefik { container: String },
     AttachedProject { slug: String, container: String },
+    IssuedCertificate { slug: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -113,6 +114,15 @@ fn normalize(path: &Path) -> String {
 /// Runs one reconciliation pass. Route files are written even when the
 /// runtime is unavailable; runtime problems are reported as warnings.
 pub async fn reconcile(store: &Store, runtime: Option<&dyn Runtime>) -> Result<Report> {
+    reconcile_with(store, runtime, &certs::Mkcert).await
+}
+
+/// [`reconcile`] with a chosen certificate issuer.
+pub async fn reconcile_with(
+    store: &Store,
+    runtime: Option<&dyn Runtime>,
+    issuer: &dyn certs::Issuer,
+) -> Result<Report> {
     let settings = store.settings()?;
     let Some(traefik_settings) = &settings.traefik else {
         return Err(Error::NotSetUp);
@@ -146,6 +156,8 @@ pub async fn reconcile(store: &Store, runtime: Option<&dyn Runtime>) -> Result<R
         None => None,
     };
 
+    let mut issuer_ready: Option<std::result::Result<(), String>> = None;
+    let mut uncertified: Option<String> = None;
     for project in &projects {
         let mut status = ProjectStatus {
             slug: project.slug.clone(),
@@ -190,6 +202,35 @@ pub async fn reconcile(store: &Store, runtime: Option<&dyn Runtime>) -> Result<R
             }
         }
 
+        // HTTPS entrypoints need a certificate browsers trust for these names.
+        if traefik_settings.tls && !project.routes.is_empty() {
+            // Settings saved before Zevo recorded where a containerised Traefik
+            // reads its files cannot produce a path Traefik can open.
+            let path_known =
+                traefik_settings.container.is_none() || traefik_settings.container_dir.is_some();
+            let ready = if path_known {
+                issuer_ready.get_or_insert_with(|| issuer.ready()).clone()
+            } else {
+                Err(
+                    "Open the Traefik page and choose \"Detect again\" (or run `zevo setup`) so \
+                     Zevo learns where Traefik reads certificates"
+                        .to_string(),
+                )
+            };
+            match &ready {
+                Ok(()) => match certs::ensure(project, &settings, issuer) {
+                    Ok(true) => report.actions.push(Action::IssuedCertificate {
+                        slug: project.slug.clone(),
+                    }),
+                    Ok(false) => {}
+                    Err(e) => report.warnings.push(format!("{}: {e}", project.slug)),
+                },
+                // Fall back to whatever certificate Traefik already serves.
+                Err(_) if certs::existing(&project.slug, traefik_settings).is_some() => {}
+                Err(reason) => uncertified = Some(reason.clone()),
+            }
+        }
+
         // Containers are reached by their own name, which changes on rebuild,
         // so the file follows the container that currently exists.
         match traefik::write_project_for(project, &settings, status.container.as_deref()) {
@@ -208,6 +249,12 @@ pub async fn reconcile(store: &Store, runtime: Option<&dyn Runtime>) -> Result<R
         {
             report.actions.push(Action::RemovedOrphanRoutes { slug });
         }
+    }
+    if let Some(reason) = uncertified {
+        report.warnings.push(format!(
+            "Zevo could not create HTTPS certificates, so browsers may warn about project \
+             addresses unless your Traefik already has a certificate for them. {reason}"
+        ));
     }
     Ok(report)
 }
@@ -289,7 +336,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::open(tmp.path());
         let rt = FakeRuntime::new();
-        setup::bootstrap(&store, &rt, Some(80)).await.unwrap();
+        setup::bootstrap(&store, &rt, Some(80), false)
+            .await
+            .unwrap();
         (tmp, store, rt)
     }
 
@@ -468,11 +517,89 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn https_projects_get_a_certificate_listed_in_their_route_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path());
+        let rt = FakeRuntime::new();
+        setup::bootstrap(&store, &rt, Some(8090), true)
+            .await
+            .unwrap();
+        store.add_project(&project("shop", "/work/shop")).unwrap();
+        let issuer = certs::FakeIssuer::default();
+
+        let report = reconcile_with(&store, Some(&rt), &issuer).await.unwrap();
+        assert!(report.actions.contains(&Action::IssuedCertificate {
+            slug: "shop".into()
+        }));
+        assert_eq!(
+            *issuer.issued.lock().unwrap(),
+            [["*.shop.localhost", "shop.localhost"]]
+        );
+        let file =
+            std::fs::read_to_string(store.managed_dynamic_dir().join("zevo-shop.yml")).unwrap();
+        assert!(file.contains("tls: {}"), "{file}");
+        assert!(
+            file.contains("certFile: /etc/traefik/dynamic/zevo-certs/shop.pem"),
+            "{file}"
+        );
+        assert!(
+            file.contains("keyFile: /etc/traefik/dynamic/zevo-certs/shop-key.pem"),
+            "{file}"
+        );
+
+        // Nothing to do the second time.
+        let again = reconcile_with(&store, Some(&rt), &issuer).await.unwrap();
+        assert!(again.actions.is_empty(), "{:?}", again.actions);
+
+        // Removing the project removes its certificate too.
+        register::remove(&store, "shop").unwrap();
+        assert_eq!(
+            std::fs::read_dir(store.managed_dynamic_dir().join(certs::CERT_DIR))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn without_mkcert_routes_are_still_written_with_one_warning() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path());
+        let rt = FakeRuntime::new();
+        setup::bootstrap(&store, &rt, Some(8091), true)
+            .await
+            .unwrap();
+        store.add_project(&project("shop", "/work/shop")).unwrap();
+        store.add_project(&project("blog", "/work/blog")).unwrap();
+        let issuer = certs::FakeIssuer {
+            unavailable: Some("mkcert is not installed".into()),
+            ..Default::default()
+        };
+
+        let report = reconcile_with(&store, Some(&rt), &issuer).await.unwrap();
+        assert_eq!(
+            report
+                .warnings
+                .iter()
+                .filter(|w| w.contains("mkcert is not installed"))
+                .count(),
+            1
+        );
+        let file =
+            std::fs::read_to_string(store.managed_dynamic_dir().join("zevo-shop.yml")).unwrap();
+        assert!(
+            file.contains("tls: {}") && !file.contains("certFile"),
+            "{file}"
+        );
+    }
+
     #[test]
     fn urls_use_https_when_the_entrypoint_does() {
         let settings = Settings {
             traefik: Some(crate::model::TraefikSettings {
                 tls: true,
+                container_dir: None,
                 mode: crate::model::TraefikMode::Adopted,
                 container: None,
                 dynamic_dir: "/x".into(),
@@ -492,6 +619,7 @@ mod tests {
         let settings = Settings {
             traefik: Some(crate::model::TraefikSettings {
                 tls: false,
+                container_dir: None,
                 mode: crate::model::TraefikMode::Managed,
                 container: None,
                 dynamic_dir: "/x".into(),

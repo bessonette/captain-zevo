@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::model::{Backend, Project, Settings, Target, TraefikSettings, validate_slug};
-use crate::{Error, Result};
+use crate::{Error, Result, certs};
 
 /// First line of every file Zevo manages.
 pub const MANAGED_HEADER: &str = "# managed by captain-zevo — do not edit; changes are overwritten";
@@ -34,6 +34,21 @@ pub fn file_name(slug: &str) -> String {
 #[derive(Serialize)]
 struct Doc {
     http: Http,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tls: Option<TlsDoc>,
+}
+
+#[derive(Serialize)]
+struct TlsDoc {
+    certificates: Vec<Certificate>,
+}
+
+#[derive(Serialize)]
+struct Certificate {
+    #[serde(rename = "certFile")]
+    cert_file: String,
+    #[serde(rename = "keyFile")]
+    key_file: String,
 }
 
 #[derive(Serialize)]
@@ -193,6 +208,17 @@ pub fn render_for(
             services,
             servers_transports,
         },
+        // Present once `certs::ensure` has issued the project's certificate.
+        tls: if traefik.tls {
+            certs::existing(&project.slug, traefik).map(|(cert_file, key_file)| TlsDoc {
+                certificates: vec![Certificate {
+                    cert_file,
+                    key_file,
+                }],
+            })
+        } else {
+            None
+        },
     };
     let body = serde_norway::to_string(&doc).map_err(|e| {
         Error::Other(format!(
@@ -304,6 +330,7 @@ pub fn remove_project(slug: &str, dynamic_dir: &Path) -> Result<bool> {
     if !has_header(&existing) {
         return Err(not_managed(&path));
     }
+    certs::remove(slug, dynamic_dir)?;
     match fs::remove_file(&path) {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
@@ -515,6 +542,7 @@ mod tests {
         Settings {
             traefik: Some(TraefikSettings {
                 tls: false,
+                container_dir: None,
                 mode: TraefikMode::Managed,
                 container: Some("zevo-traefik".into()),
                 dynamic_dir: dir.to_path_buf(),

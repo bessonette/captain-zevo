@@ -191,7 +191,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::open(tmp.path());
         let rt = FakeRuntime::new();
-        setup::bootstrap(&store, &rt, Some(8099)).await.unwrap();
+        setup::bootstrap(&store, &rt, Some(8099), false)
+            .await
+            .unwrap();
 
         let checks = run(&store, Some(&rt)).await;
         assert_eq!(level(&checks, "runtime"), Level::Ok);

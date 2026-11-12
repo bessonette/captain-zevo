@@ -127,16 +127,15 @@ impl Runtime for FakeRuntime {
                 name: spec.container.clone(),
                 image: spec.image.clone(),
                 running: true,
-                args: vec![
-                    "--providers.file.directory=/etc/traefik/dynamic".into(),
-                    "--entrypoints.web.address=:80".into(),
-                ],
+                args: spec.args(),
                 mounts: vec![Mount {
                     source: spec.dynamic_dir.to_string_lossy().into_owned(),
                     destination: "/etc/traefik/dynamic".into(),
                 }],
                 networks: [(spec.network.clone(), Vec::new())].into(),
-                published_ports: [(80, spec.http_port)].into(),
+                published_ports: std::iter::once((80, spec.http_port))
+                    .chain(spec.https_port.map(|port| (443, port)))
+                    .collect(),
                 ..ContainerInfo::default()
             });
             Ok(())

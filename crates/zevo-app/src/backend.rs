@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use zevo_core::certs::{self, Issuer as _};
 use zevo_core::model::{
     DevcontainerKind, LOCAL_HOST_ID, Project, Route, Settings, Target, TraefikMode, TraefikSettings,
 };
@@ -204,7 +205,7 @@ impl Backend for SystemBackend {
     fn bootstrap(&self) -> Result<(), String> {
         self.tokio.block_on(async {
             let docker = DockerRuntime::connect().map_err(|e| e.to_string())?;
-            setup::bootstrap(&self.store, &docker, None)
+            setup::bootstrap(&self.store, &docker, None, certs::Mkcert.ready().is_ok())
                 .await
                 .map(|_| ())
                 .map_err(|e| e.to_string())
@@ -371,6 +372,7 @@ impl Backend for DemoBackend {
         let settings = Settings {
             traefik: self.set_up.lock().unwrap().then(|| TraefikSettings {
                 tls: false,
+                container_dir: None,
                 mode: TraefikMode::Adopted,
                 container: Some("traefik".into()),
                 dynamic_dir: "/home/dev/traefik/dynamic".into(),
@@ -510,6 +512,7 @@ impl Backend for DemoBackend {
             entrypoint: Some("websecure".into()),
             http_port: Some(443),
             tls: true,
+            container_dir: None,
             network: Some("proxy".into()),
             problems: Vec::new(),
         }])
