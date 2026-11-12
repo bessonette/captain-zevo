@@ -51,6 +51,45 @@ pub struct Report {
     pub actions: Vec<Action>,
     pub projects: Vec<ProjectStatus>,
     pub warnings: Vec<String>,
+    /// Devcontainers on this machine that are not registered yet.
+    pub discovered: Vec<Discovered>,
+}
+
+/// A devcontainer Zevo found but does not manage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Discovered {
+    /// The project folder the container was created from.
+    pub folder: std::path::PathBuf,
+    pub container: String,
+    pub running: bool,
+}
+
+/// Devcontainers whose folder no registered project uses, one per folder
+/// (a running container wins), sorted by folder.
+pub fn discover(containers: &[ContainerInfo], projects: &[Project]) -> Vec<Discovered> {
+    let registered: Vec<String> = projects.iter().map(|p| normalize(&p.path)).collect();
+    let mut found: std::collections::BTreeMap<String, Discovered> = Default::default();
+    for c in containers {
+        let Some(folder) = c.labels.get("devcontainer.local_folder") else {
+            continue;
+        };
+        let key = normalize(Path::new(folder));
+        if registered.contains(&key) {
+            continue;
+        }
+        let candidate = Discovered {
+            folder: folder.into(),
+            container: c.name.clone(),
+            running: c.running,
+        };
+        match found.get(&key) {
+            Some(existing) if existing.running || !candidate.running => {}
+            _ => {
+                found.insert(key, candidate);
+            }
+        }
+    }
+    found.into_values().collect()
 }
 
 /// URLs a project is served at.
@@ -160,6 +199,9 @@ pub async fn reconcile_with(
         None => None,
     };
 
+    if let Some(containers) = &containers {
+        report.discovered = discover(containers, &projects);
+    }
     let mut issuer_ready: Option<std::result::Result<(), String>> = None;
     let mut uncertified: Option<String> = None;
     for project in &projects {
@@ -563,6 +605,34 @@ mod tests {
                 Listening::No,
                 Listening::Unknown
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn discovers_devcontainers_that_are_not_registered() {
+        let (_tmp, store, rt) = set_up().await;
+        store.add_project(&project("shop", "/work/shop")).unwrap();
+        rt.add_container(devcontainer("vsc-shop", "/work/shop"));
+        rt.add_container(devcontainer("vsc-blog", "/work/blog/"));
+        let mut old = devcontainer("vsc-docs-old", "/work/docs");
+        old.running = false;
+        rt.add_container(old);
+        rt.add_container(devcontainer("vsc-docs-new", "/work/docs"));
+        rt.add_container(ContainerInfo {
+            name: "postgres".into(),
+            running: true,
+            ..ContainerInfo::default()
+        });
+
+        let report = reconcile(&store, Some(&rt)).await.unwrap();
+        let found: Vec<(&str, &str)> = report
+            .discovered
+            .iter()
+            .map(|d| (d.folder.to_str().unwrap(), d.container.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [("/work/blog/", "vsc-blog"), ("/work/docs", "vsc-docs-new")]
         );
     }
 

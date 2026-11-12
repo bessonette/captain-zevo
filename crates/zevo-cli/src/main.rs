@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use zevo_core::certs::{self, Issuer as _};
+use zevo_core::ide::{self, Editor};
 use zevo_core::model::{Route, Target};
 use zevo_core::reconcile::{self, Action, ContainerState, Report};
 use zevo_core::runtime::{DockerRuntime, Runtime};
@@ -55,6 +56,16 @@ enum Command {
     },
     /// Check that everything Zevo depends on is working.
     Doctor,
+    /// List devcontainers on this machine that are not registered yet.
+    Discover,
+    /// Open a project in an editor, attached to its devcontainer.
+    Open {
+        slug: String,
+        /// vscode, cursor, windsurf, vscodium or zed (default: your setting,
+        /// else the first one installed).
+        #[arg(long)]
+        editor: Option<String>,
+    },
 }
 
 #[derive(Args)]
@@ -259,6 +270,44 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     }
                 }
             }
+        }
+        Command::Discover => {
+            let report = reconcile_once(&store).await?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&report.discovered)?);
+            } else if report.discovered.is_empty() {
+                println!("Every devcontainer on this machine is already registered.");
+            } else {
+                for d in &report.discovered {
+                    let state = if d.running { "running" } else { "stopped" };
+                    println!("{:<10} {}", state, d.folder.display());
+                }
+                println!("\nRegister one with: zevo add <folder>");
+            }
+        }
+        Command::Open { slug, editor } => {
+            let project = store.project(&slug)?;
+            let editor = match editor {
+                Some(name) => serde_json::from_value::<Editor>(serde_json::Value::String(
+                    name.to_lowercase(),
+                ))
+                .map_err(|_| {
+                    anyhow!(
+                        "unknown editor '{name}' (use vscode, cursor, windsurf, vscodium or zed)"
+                    )
+                })?,
+                None => store
+                    .settings()?
+                    .editor
+                    .or_else(|| ide::available().into_iter().next())
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "no supported editor found (VS Code, Cursor, Windsurf, VSCodium or Zed)"
+                        )
+                    })?,
+            };
+            ide::open(editor, &project)?;
+            println!("Opening {} in {}.", project.slug, editor.name());
         }
         Command::Doctor => {
             let (runtime, _) = connect().await;

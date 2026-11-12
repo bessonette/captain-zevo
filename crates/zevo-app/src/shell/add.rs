@@ -82,6 +82,21 @@ fn parse_route(subdomain: &str, port: &str) -> Result<Route, String> {
 }
 
 impl Shell {
+    /// Opens the add page for a known folder and reads it straight away.
+    pub(super) fn open_add_for(
+        &mut self,
+        folder: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_add(window, cx);
+        if let Some(form) = &self.add {
+            form.folder
+                .update(cx, |input, cx| input.set_value(folder, window, cx));
+        }
+        self.inspect(window, cx);
+    }
+
     pub(super) fn open_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let folder = text_input("/path/to/project", "", window, cx);
         // Enter in the folder box continues, like the button.

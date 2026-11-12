@@ -28,6 +28,8 @@ pub struct Detected {
     pub ports: Vec<u16>,
     /// The `customizations.zevo` block, if the project has one.
     pub declared: Option<Declared>,
+    /// `workspaceFolder`: where the project is mounted inside the container.
+    pub workspace_folder: Option<String>,
 }
 
 /// What a project says about itself in `customizations.zevo`.
@@ -233,6 +235,10 @@ pub fn detect(folder: &Path) -> Result<Detected> {
         service,
         ports: ports.0,
         declared,
+        workspace_folder: obj
+            .get("workspaceFolder")
+            .and_then(Json::as_str)
+            .map(str::to_owned),
     })
 }
 

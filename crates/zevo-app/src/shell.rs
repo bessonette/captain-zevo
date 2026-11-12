@@ -144,6 +144,28 @@ impl Shell {
         .detach();
     }
 
+    fn open_editor(
+        &mut self,
+        slug: String,
+        editor: zevo_core::ide::Editor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let backend = self.backend.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { backend.open_in_editor(&slug, editor) })
+                .await;
+            _ = this.update_in(cx, |_, window, cx| match result {
+                Ok(()) => window.push_notification(format!("Opening in {}…", editor.name()), cx),
+                Err(e) => {
+                    window.push_notification(format!("Could not open {}: {e}", editor.name()), cx)
+                }
+            });
+        })
+        .detach();
+    }
+
     fn go(&mut self, page: Page, cx: &mut Context<Self>) {
         self.page = page;
         self.tab = 0;
@@ -570,11 +592,77 @@ impl Shell {
             }))
         };
 
+        // Devcontainers on this machine that are not registered, offered for adding.
+        let show_found = query.is_empty()
+            && filter.as_deref().is_none_or(|host| host == LOCAL_HOST_ID)
+            && !snapshot.discovered.is_empty();
+        let found = show_found.then(|| {
+            v_flex()
+                .px_4()
+                .pt_6()
+                .pb_4()
+                .child(caption("Found on this machine", cx))
+                .child(
+                    div()
+                        .pb_2()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Devcontainers that are not in Zevo yet."),
+                )
+                .children(snapshot.discovered.iter().enumerate().map(|(ix, d)| {
+                    let folder = d.folder.to_string_lossy().into_owned();
+                    let name = d
+                        .folder
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| folder.clone());
+                    h_flex()
+                        .py_2()
+                        .gap_3()
+                        .border_t_1()
+                        .border_color(cx.theme().border.opacity(0.6))
+                        .child(
+                            h_flex()
+                                .w(px(102.))
+                                .gap_1p5()
+                                .text_sm()
+                                .child(div().size(px(6.)).rounded_full().bg(if d.running {
+                                    cx.theme().success
+                                } else {
+                                    cx.theme().muted_foreground
+                                }))
+                                .child(if d.running { "Running" } else { "Stopped" }),
+                        )
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .child(div().font_medium().child(name))
+                                .child(
+                                    mono(folder.clone(), cx)
+                                        .text_color(cx.theme().muted_foreground),
+                                ),
+                        )
+                        .child(
+                            Button::new(("add-found", ix))
+                                .small()
+                                .icon(IconName::Plus)
+                                .label("Add")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.open_add_for(folder.clone(), window, cx)
+                                })),
+                        )
+                }))
+        });
+
         v_flex().size_full().child(header).child(columns).child(
-            div()
-                .flex_1()
-                .overflow_hidden()
-                .child(v_flex().size_full().overflow_y_scrollbar().child(body)),
+            div().flex_1().overflow_hidden().child(
+                v_flex()
+                    .size_full()
+                    .overflow_y_scrollbar()
+                    .child(body)
+                    .children(found),
+            ),
         )
     }
 
@@ -639,11 +727,24 @@ impl Shell {
                 .when_some(first_url, |row, url| {
                     row.child(
                         Button::new("open")
-                            .primary()
                             .small()
+                            .outline()
                             .icon(IconName::ExternalLink)
                             .label("Open in browser")
                             .on_click(move |_, _, cx| cx.open_url(&url)),
+                    )
+                })
+                .when_some(snapshot.editor(), |row, editor| {
+                    let slug = p.slug.clone();
+                    row.child(
+                        Button::new("open-editor")
+                            .primary()
+                            .small()
+                            .icon(IconName::SquareTerminal)
+                            .label(format!("Open in {}", editor.name()))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_editor(slug.clone(), editor, window, cx)
+                            })),
                     )
                 }),
             cx,
@@ -1046,6 +1147,30 @@ impl Shell {
                     match &snapshot.runtime {
                         Ok(version) => version.clone(),
                         Err(e) => format!("Unreachable: {e}"),
+                    },
+                    cx,
+                ))
+                .child(field(
+                    "Editor",
+                    if snapshot.editors.is_empty() {
+                        div().text_color(cx.theme().muted_foreground).child(
+                            "No supported editor found (VS Code, Cursor, Windsurf, VSCodium or Zed).",
+                        )
+                    } else {
+                        let current = snapshot.editor();
+                        h_flex().gap_2().children(snapshot.editors.iter().enumerate().map(|(ix, editor)| {
+                            let editor = *editor;
+                            Button::new(("editor", ix))
+                                .small()
+                                .label(editor.name())
+                                .when(current == Some(editor), |b| b.primary())
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    match this.backend.set_editor(editor) {
+                                        Ok(()) => this.reload_now(cx),
+                                        Err(e) => window.push_notification(format!("Could not save: {e}"), cx),
+                                    }
+                                }))
+                        }))
                     },
                     cx,
                 ))

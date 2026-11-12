@@ -73,6 +73,8 @@ More commands:
 | `zevo route add <slug> [sub:]port` / `zevo route rm <slug> [sub]` | Edit routes |
 | `zevo show <slug>` | Show a project and its generated Traefik config |
 | `zevo rm <slug>` | Unregister and remove its routes |
+| `zevo discover` | List devcontainers on this machine that are not registered yet |
+| `zevo open <slug> [--editor zed]` | Open a project in VS Code, Cursor, Windsurf, VSCodium or Zed, attached to its devcontainer |
 | `zevo doctor` | Check the runtime, Traefik, the route directory and DNS |
 
 Add `--json` to `ls`, `show`, `reconcile` and `doctor` for scripting.
@@ -174,9 +176,9 @@ Hand edits take effect on the next `zevo reconcile`.
 1. **Core and CLI, local projects** — done.
 2. **Desktop app** — done for local projects: first-run setup, adding projects,
    editing routes, and the project, Traefik and settings screens.
-3. **Lifecycle and editors** — start/stop/rebuild, logs, discovery of running
-   devcontainers, new projects from templates, open in VS Code (and forks),
-   Zed and JetBrains.
+3. **Lifecycle and editors** — discovery of running devcontainers and open in
+   VS Code (and forks) or Zed are done. Still to come: start/stop/rebuild,
+   logs, new projects from templates, JetBrains.
 4. **Remote hosts** — projects on other machines over SSH, with an edge Traefik
    per host.
 5. **Polish** — installers, system tray, local HTTPS.

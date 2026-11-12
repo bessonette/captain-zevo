@@ -8,10 +8,11 @@ use std::sync::Mutex;
 
 use zevo_core::certs::{self, Issuer as _};
 use zevo_core::health::Listening;
+use zevo_core::ide::{self, Editor};
 use zevo_core::model::{
     DevcontainerKind, LOCAL_HOST_ID, Project, Route, Settings, Target, TraefikMode, TraefikSettings,
 };
-use zevo_core::reconcile::{self, ContainerState, ProjectStatus};
+use zevo_core::reconcile::{self, ContainerState, Discovered, ProjectStatus};
 use zevo_core::register;
 use zevo_core::runtime::{DockerRuntime, Runtime};
 use zevo_core::setup::{self, Candidate};
@@ -37,6 +38,21 @@ pub struct Snapshot {
     /// Runtime name and version, or why it is unreachable.
     pub runtime: Result<String, String>,
     pub warnings: Vec<String>,
+    /// Devcontainers on this machine that are not registered yet.
+    pub discovered: Vec<Discovered>,
+    /// Editors installed on this machine.
+    pub editors: Vec<Editor>,
+}
+
+impl Snapshot {
+    /// The editor "Open in editor" uses: the chosen one if it is installed,
+    /// else the first installed one.
+    pub fn editor(&self) -> Option<Editor> {
+        self.settings
+            .editor
+            .filter(|e| self.editors.contains(e))
+            .or_else(|| self.editors.first().copied())
+    }
 }
 
 impl Default for Snapshot {
@@ -47,6 +63,8 @@ impl Default for Snapshot {
             routers: Vec::new(),
             runtime: Err("not checked yet".to_string()),
             warnings: Vec::new(),
+            discovered: Vec::new(),
+            editors: Vec::new(),
         }
     }
 }
@@ -71,6 +89,10 @@ pub trait Backend: Send + Sync + 'static {
     fn adopt(&self, container: &str) -> Result<(), String>;
     /// Starts a Zevo-managed Traefik.
     fn bootstrap(&self) -> Result<(), String>;
+    /// Opens the project in the editor, attached to its devcontainer.
+    fn open_in_editor(&self, slug: &str, editor: Editor) -> Result<(), String>;
+    /// Remembers which editor "Open in editor" uses.
+    fn set_editor(&self, editor: Editor) -> Result<(), String>;
 }
 
 /// The real system: the on-disk registry and the local container runtime.
@@ -110,6 +132,7 @@ impl Backend for SystemBackend {
             let mut snapshot = Snapshot {
                 settings,
                 runtime,
+                editors: ide::available(),
                 ..Snapshot::default()
             };
             let unknown = |p: &Project| ProjectStatus {
@@ -133,6 +156,7 @@ impl Backend for SystemBackend {
                     // Reconciling may have re-read declared routes from disk.
                     projects = self.store.projects().map_err(|e| e.to_string())?;
                     snapshot.warnings = report.warnings;
+                    snapshot.discovered = report.discovered;
                     snapshot.routers =
                         traefik::scan(&traefik_settings.dynamic_dir).map_err(|e| e.to_string())?;
                     report.projects
@@ -215,12 +239,26 @@ impl Backend for SystemBackend {
                 .map_err(|e| e.to_string())
         })
     }
+
+    fn open_in_editor(&self, slug: &str, editor: Editor) -> Result<(), String> {
+        let project = self.store.project(slug).map_err(|e| e.to_string())?;
+        ide::open(editor, &project).map_err(|e| e.to_string())
+    }
+
+    fn set_editor(&self, editor: Editor) -> Result<(), String> {
+        let mut settings = self.store.settings().map_err(|e| e.to_string())?;
+        settings.editor = Some(editor);
+        self.store
+            .save_settings(&settings)
+            .map_err(|e| e.to_string())
+    }
 }
 
 /// Example data for `--demo`, screenshots and tests. Touches nothing real.
 pub struct DemoBackend {
     projects: Mutex<Vec<(Project, ContainerState, Option<&'static str>)>>,
     set_up: Mutex<bool>,
+    editor: Mutex<Option<Editor>>,
 }
 
 impl DemoBackend {
@@ -368,14 +406,17 @@ impl Default for DemoBackend {
                 ),
             ]),
             set_up: Mutex::new(true),
+            editor: Mutex::new(None),
         }
     }
 }
 
 impl Backend for DemoBackend {
     fn load(&self) -> Result<Snapshot, String> {
+        let set_up = *self.set_up.lock().unwrap();
         let settings = Settings {
-            traefik: self.set_up.lock().unwrap().then(|| TraefikSettings {
+            editor: *self.editor.lock().unwrap(),
+            traefik: set_up.then(|| TraefikSettings {
                 tls: false,
                 container_dir: None,
                 mode: TraefikMode::Adopted,
@@ -444,6 +485,26 @@ impl Backend for DemoBackend {
             projects: views,
             routers,
             runtime: Ok("Docker Engine 29.7 (example)".into()),
+            editors: vec![Editor::VsCode, Editor::Cursor, Editor::Zed],
+            discovered: if set_up {
+                vec![
+                    Discovered {
+                        folder: "/home/dev/code/inventory".into(),
+                        container: "vsc-inventory-a41".into(),
+                        running: true,
+                    },
+                    Discovered {
+                        folder: "/home/dev/code/old-prototype".into(),
+                        container: "vsc-old-prototype-9c2".into(),
+                        running: false,
+                    },
+                ]
+                .into_iter()
+                .filter(|d| !projects.iter().any(|(p, _, _)| p.path == d.folder))
+                .collect()
+            } else {
+                Vec::new()
+            },
             warnings: if has_billing {
                 vec![
                     "billing: on host 'buildbox', which is not managed yet; use host-port routes"
@@ -542,6 +603,15 @@ impl Backend for DemoBackend {
 
     fn bootstrap(&self) -> Result<(), String> {
         *self.set_up.lock().unwrap() = true;
+        Ok(())
+    }
+
+    fn open_in_editor(&self, _slug: &str, _editor: Editor) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn set_editor(&self, editor: Editor) -> Result<(), String> {
+        *self.editor.lock().unwrap() = Some(editor);
         Ok(())
     }
 }

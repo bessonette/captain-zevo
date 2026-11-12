@@ -21,6 +21,9 @@ pub struct Settings {
     /// `None` until `zevo setup` has run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traefik: Option<TraefikSettings>,
+    /// Editor that "Open in editor" uses; the first installed one if unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor: Option<crate::ide::Editor>,
 }
 
 fn default_suffix() -> String {
@@ -36,6 +39,7 @@ impl Default for Settings {
             domain_suffix: default_suffix(),
             network: default_network(),
             traefik: None,
+            editor: None,
         }
     }
 }
