@@ -29,25 +29,53 @@ pub trait Issuer: Send + Sync {
 /// Issues certificates by running the `mkcert` command.
 pub struct Mkcert;
 
-/// `mkcert` on the PATH, or in the usual install locations: an app started
-/// from the Finder or a desktop launcher does not get the shell's PATH.
+/// The `mkcert` to run: the first executable found on the PATH, then in the
+/// usual install locations. An app started from the Finder or a desktop
+/// launcher does not get the shell's PATH, so the PATH alone is not enough.
 fn mkcert() -> Command {
-    let on_path = std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("mkcert").is_file()));
-    if !on_path {
-        let home = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf());
-        let candidates = [
-            Some(PathBuf::from("/opt/homebrew/bin/mkcert")),
-            Some(PathBuf::from("/usr/local/bin/mkcert")),
-            Some(PathBuf::from("/home/linuxbrew/.linuxbrew/bin/mkcert")),
-            home.as_ref().map(|h| h.join(".local/bin/mkcert")),
-            home.as_ref().map(|h| h.join("go/bin/mkcert")),
-        ];
-        if let Some(found) = candidates.into_iter().flatten().find(|p| p.is_file()) {
-            return Command::new(found);
-        }
+    let name = if cfg!(windows) {
+        "mkcert.exe"
+    } else {
+        "mkcert"
+    };
+    let mut candidates: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path)
+                .map(|dir| dir.join(name))
+                .collect()
+        })
+        .unwrap_or_default();
+    candidates.extend(
+        [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/opt/local/bin",
+            "/home/linuxbrew/.linuxbrew/bin",
+        ]
+        .map(|dir| Path::new(dir).join(name)),
+    );
+    if let Some(dirs) = directories::BaseDirs::new() {
+        candidates.extend(
+            [".local/bin", "go/bin", ".nix-profile/bin"]
+                .map(|dir| dirs.home_dir().join(dir).join(name)),
+        );
     }
-    Command::new("mkcert")
+    match candidates.into_iter().find(|path| is_executable(path)) {
+        Some(path) => Command::new(path),
+        None => Command::new(name),
+    }
+}
+
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
 }
 
 impl Issuer for Mkcert {

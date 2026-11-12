@@ -23,19 +23,25 @@ pub struct DockerRuntime {
 }
 
 impl DockerRuntime {
-    /// Connects using `DOCKER_HOST` if set, otherwise the platform's default
-    /// socket or named pipe. Connection errors surface on first use.
+    /// Connects using `DOCKER_HOST` if set. Otherwise uses the first socket
+    /// that accepts a connection: the standard one, then the per-user sockets
+    /// of Docker Desktop, OrbStack, Colima, Rancher Desktop and rootless
+    /// Docker or Podman. Falls back to the platform default (including the
+    /// Windows named pipe); connection errors then surface on first use.
     pub fn connect() -> Result<Self> {
-        if std::env::var_os("DOCKER_HOST").is_none()
-            && let Some(socket) = fallback_socket()
-        {
-            return Docker::connect_with_socket(
-                &socket.to_string_lossy(),
-                120,
-                bollard::API_DEFAULT_VERSION,
-            )
-            .map(|docker| Self { docker })
-            .map_err(err);
+        // An empty DOCKER_HOST means unset, as it does for the docker CLI.
+        let host_set = std::env::var_os("DOCKER_HOST").is_some_and(|v| !v.is_empty());
+        if !host_set {
+            if let Some(socket) = live_socket()
+                && let Some(path) = socket.to_str()
+            {
+                return Docker::connect_with_socket(path, 120, bollard::API_DEFAULT_VERSION)
+                    .map(|docker| Self { docker })
+                    .map_err(err);
+            }
+            return Docker::connect_with_local_defaults()
+                .map(|docker| Self { docker })
+                .map_err(err);
         }
         Docker::connect_with_defaults()
             .map(|docker| Self { docker })
@@ -43,31 +49,32 @@ impl DockerRuntime {
     }
 }
 
-/// When the standard socket is absent, the per-user socket of whichever
-/// runtime is installed (Docker Desktop, OrbStack, Colima, Rancher Desktop,
-/// rootless Podman).
+/// The first known socket with a daemon listening on it. A socket file left
+/// behind by a stopped or uninstalled runtime is skipped.
 #[cfg(unix)]
-fn fallback_socket() -> Option<std::path::PathBuf> {
-    use std::path::{Path, PathBuf};
-    if Path::new("/var/run/docker.sock").exists() {
-        return None;
+fn live_socket() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let mut candidates = vec![PathBuf::from("/var/run/docker.sock")];
+    if let Some(dirs) = directories::BaseDirs::new() {
+        let home = dirs.home_dir();
+        candidates.extend([
+            home.join(".docker/run/docker.sock"),
+            home.join(".orbstack/run/docker.sock"),
+            home.join(".colima/default/docker.sock"),
+            home.join(".rd/docker.sock"),
+        ]);
     }
-    let home = directories::BaseDirs::new()?.home_dir().to_path_buf();
-    let mut candidates = vec![
-        home.join(".docker/run/docker.sock"),
-        home.join(".orbstack/run/docker.sock"),
-        home.join(".colima/default/docker.sock"),
-        home.join(".rd/docker.sock"),
-    ];
     if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
         candidates.push(PathBuf::from(&runtime_dir).join("docker.sock"));
         candidates.push(PathBuf::from(&runtime_dir).join("podman/podman.sock"));
     }
-    candidates.into_iter().find(|p| p.exists())
+    candidates
+        .into_iter()
+        .find(|path| std::os::unix::net::UnixStream::connect(path).is_ok())
 }
 
 #[cfg(not(unix))]
-fn fallback_socket() -> Option<std::path::PathBuf> {
+fn live_socket() -> Option<std::path::PathBuf> {
     None
 }
 

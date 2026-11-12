@@ -9,6 +9,24 @@
 set -eu
 cd "$(dirname "$0")/.."
 
+usage() {
+    echo "usage: scripts/bundle-macos.sh [--install]" >&2
+    exit "${1:-2}"
+}
+
+INSTALL=0
+case "$#" in
+    0) ;;
+    1)
+        case "$1" in
+            --install) INSTALL=1 ;;
+            -h | --help) usage 0 ;;
+            *) echo "unknown option: $1" >&2; usage ;;
+        esac
+        ;;
+    *) usage ;;
+esac
+
 if [ "$(uname -s)" != "Darwin" ]; then
     echo "This script builds a macOS app and must run on macOS." >&2
     exit 1
@@ -47,8 +65,14 @@ PLIST
 codesign --force --deep --sign - "$APP"
 echo "Built $APP"
 
-if [ "${1:-}" = "--install" ]; then
-    rm -rf "/Applications/Captain Zevo.app"
-    cp -R "$APP" /Applications/
-    echo "Installed to /Applications/Captain Zevo.app"
+if [ "$INSTALL" = 1 ]; then
+    # Copy next to the destination first, so a failed copy leaves the
+    # installed app in place.
+    DEST="/Applications/Captain Zevo.app"
+    STAGED="/Applications/.Captain Zevo.app.new"
+    rm -rf "$STAGED"
+    cp -R "$APP" "$STAGED"
+    rm -rf "$DEST"
+    mv "$STAGED" "$DEST"
+    echo "Installed to $DEST"
 fi
