@@ -505,8 +505,8 @@ impl Shell {
                 SidebarHeader::new().child(
                     h_flex()
                         .gap_2()
-                        .child(img(self.logo.clone()).size(px(22.)))
-                        .child(div().font_semibold().child("Captain Zevo")),
+                        .child(img(self.logo.clone()).size(px(36.)))
+                        .child(div().text_lg().font_semibold().child("Captain Zevo")),
                 ),
             )
             .child(SidebarGroup::new("Projects").child(SidebarMenu::new().children(project_items)))
