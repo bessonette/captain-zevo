@@ -127,6 +127,7 @@ mod tests {
             declared: false,
             address: None,
             env_file: None,
+            skip: Vec::new(),
         }
     }
 

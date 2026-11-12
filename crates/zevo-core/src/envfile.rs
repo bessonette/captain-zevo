@@ -131,6 +131,7 @@ mod tests {
             declared: true,
             address: None,
             env_file: Some(".devcontainer/zevo.env".into()),
+            skip: Vec::new(),
         }
     }
 

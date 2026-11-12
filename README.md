@@ -107,6 +107,9 @@ adds it gets the same addresses with nothing to type:
 - `slug` is a suggestion. Give a second checkout of the same repository its
   own short name (`zevo add <folder> --slug shop-lane2`) and it gets its own
   addresses under `shop-lane2.localhost`.
+  Routes that only belong to one checkout, such as an exact hostname, can be
+  left out of the others: `zevo add <folder> --slug shop-lane2 --skip wp
+  --skip local.example.com`.
 - Zevo re-reads the block on every reconcile, so editing the file updates the
   routes. Declared routes cannot be edited in Zevo; remove the block to manage
   them in Zevo instead.

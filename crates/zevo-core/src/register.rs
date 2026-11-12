@@ -74,6 +74,7 @@ fn build_draft(host: &str, path: PathBuf, detected: devcontainer::Detected) -> P
             declared: true,
             address: None,
             env_file: declared.env_file,
+            skip: Vec::new(),
         };
     }
 
@@ -102,6 +103,7 @@ fn build_draft(host: &str, path: PathBuf, detected: devcontainer::Detected) -> P
         declared: false,
         address: None,
         env_file: None,
+        skip: Vec::new(),
     }
 }
 
@@ -132,6 +134,7 @@ pub fn sync_declared(store: &Store, project: &Project) -> Result<Option<Project>
         Some(declared) => {
             updated.env_file = declared.env_file;
             updated.routes = declared.routes;
+            updated.apply_skip();
             apply_address(&mut updated);
         }
         // The block was removed: keep the routes, now editable in Zevo.
@@ -403,6 +406,32 @@ mod tests {
             address: "host.docker.internal".into(),
         };
         add(&store, &p).unwrap();
+    }
+
+    #[test]
+    fn a_checkout_can_leave_declared_routes_out() {
+        let (tmp, store) = set_up();
+        let config = r#"{"image":"node","customizations":{"zevo":{"slug":"shop","routes":[
+            {"port":3000},{"subdomain":"wp","port":8080},{"host":"local.example.com","port":4000}]}}}"#;
+        let first = folder(tmp.path(), "shop", config);
+        let second = folder(tmp.path(), "shop-lane-2", config);
+        let original = draft(&first).unwrap();
+        add(&store, &original).unwrap();
+        traefik::write_project(&original, &store.settings().unwrap()).unwrap();
+
+        // The second checkout cannot claim the exact hostname as well...
+        let mut lane = draft(&second).unwrap();
+        lane.slug = "shop-lane2".into();
+        assert!(matches!(
+            add(&store, &lane),
+            Err(Error::HostnameConflict { .. })
+        ));
+        // ...unless it leaves those routes out, and stays that way on sync.
+        lane.skip = vec!["wp".into(), "Local.Example.com".into()];
+        lane.apply_skip();
+        assert_eq!(lane.routes.len(), 1);
+        add(&store, &lane).unwrap();
+        assert_eq!(sync_declared(&store, &lane).unwrap(), None);
     }
 
     #[test]

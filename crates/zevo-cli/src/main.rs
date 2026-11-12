@@ -132,6 +132,10 @@ struct AddArgs {
     address: Option<String>,
     #[arg(long = "tag")]
     tags: Vec<String>,
+    /// Leave out a route the project declares, by subdomain or exact
+    /// hostname. Repeatable. For a second checkout of the same repository.
+    #[arg(long = "skip", value_name = "NAME")]
+    skip: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -601,6 +605,8 @@ async fn cmd_add(store: &Store, args: AddArgs, json: bool) -> Result<()> {
                 "this project defines its routes in devcontainer.json (customizations.zevo); remove --route"
             );
         }
+        project.skip = args.skip.clone();
+        project.apply_skip();
         project.address = args.address.clone();
         register::apply_address(&mut project);
     } else if !args.routes.is_empty() {

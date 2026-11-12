@@ -240,6 +240,7 @@ mod tests {
             declared: false,
             address: None,
             env_file: None,
+            skip: Vec::new(),
             slug: slug.into(),
             name: slug.into(),
             host: "local".into(),

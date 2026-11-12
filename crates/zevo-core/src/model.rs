@@ -189,6 +189,25 @@ pub struct Project {
     /// addresses as environment variables. Set by the project's declaration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_file: Option<String>,
+    /// Declared routes this checkout leaves out, named by subdomain or exact
+    /// hostname. For routes that only make sense in one checkout of a
+    /// repository that is registered more than once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skip: Vec<String>,
+}
+
+impl Project {
+    /// Drops the routes named in `skip`.
+    pub fn apply_skip(&mut self) {
+        let skip = &self.skip;
+        self.routes.retain(|r| {
+            let named = |name: &Option<String>| {
+                name.as_ref()
+                    .is_some_and(|n| skip.iter().any(|s| s.eq_ignore_ascii_case(n)))
+            };
+            !(named(&r.subdomain) || named(&r.host))
+        });
+    }
 }
 
 fn default_host() -> String {
