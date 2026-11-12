@@ -147,6 +147,12 @@ zevo add --host buildbox /srv/dev/billing
   which carries the Docker API through the command, so the wrapper only has
   to pass its arguments on to `docker`. With sudo, it must not ask for a
   password.
+- If your projects there live under one folder, name it with
+  `--projects-dir /home/me/Projects`: only devcontainers inside it are then
+  offered by `zevo discover` and the app.
+- Change a host later with `zevo host set <id>` and the same options
+  (`--name`, `--ssh`, `--address`, `--projects-dir`, ...), or with the gear
+  button on the app's Hosts screen. A host keeps its id when renamed.
 - A host's address can be a name, such as a Tailscale name or `box.local`.
   Zevo looks up its current IP on every reconcile, so routes follow the
   machine when its IP changes.

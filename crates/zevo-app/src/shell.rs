@@ -78,6 +78,8 @@ pub struct Shell {
     add: Option<add::AddForm>,
     setup: setup::SetupState,
     host_form: Option<hosts::HostForm>,
+    /// Projects whose full address list is shown in the project list.
+    expanded: std::collections::BTreeSet<String>,
     /// Project slug to the action running on it ("Starting", ...).
     busy: std::collections::BTreeMap<String, &'static str>,
     /// Why the last action on a project failed, shown on its page.
@@ -116,6 +118,7 @@ impl Shell {
             add: None,
             setup: setup::SetupState::default(),
             host_form: None,
+            expanded: Default::default(),
             busy: Default::default(),
             action_error: None,
             logs: None,
@@ -322,12 +325,20 @@ impl Shell {
     }
 }
 
-fn host_label(host: &str) -> String {
+/// How many of a project's addresses the project list shows before the
+/// rest are folded away.
+const ADDRESSES_SHOWN: usize = 2;
+
+/// The name a host is shown by: the one it was given, not its id.
+fn host_label(snapshot: &Snapshot, host: &str) -> String {
     if host == LOCAL_HOST_ID {
-        "This machine".to_string()
-    } else {
-        host.to_string()
+        return "This machine".to_string();
     }
+    snapshot
+        .hosts
+        .iter()
+        .find(|h| h.host.id == host)
+        .map_or_else(|| host.to_string(), |h| h.host.name.clone())
 }
 
 fn needs_network(view: &ProjectView) -> bool {
@@ -468,7 +479,7 @@ impl Shell {
             let n = count(Some(&host));
             let target = host.clone();
             project_items.push(
-                SidebarMenuItem::new(host_label(&host))
+                SidebarMenuItem::new(host_label(snapshot, &host))
                     .icon(if host == LOCAL_HOST_ID {
                         IconName::HardDrive
                     } else {
@@ -609,7 +620,7 @@ impl Shell {
 
         let title = filter
             .as_deref()
-            .map(host_label)
+            .map(|host| host_label(snapshot, host))
             .unwrap_or_else(|| "All projects".to_string());
         let header = self.page_header(
             title,
@@ -681,30 +692,63 @@ impl Shell {
                         .text_color(cx.theme().muted_foreground)
                         .child("no routes")
                 } else {
+                    let total = view.project.routes.len();
+                    let expanded = self.expanded.contains(&view.project.slug);
+                    let shown = if expanded || total <= ADDRESSES_SHOWN + 1 {
+                        total
+                    } else {
+                        ADDRESSES_SHOWN
+                    };
+                    let toggle = (total > ADDRESSES_SHOWN + 1).then(|| {
+                        let slug = view.project.slug.clone();
+                        h_flex().child(
+                            div()
+                                .id(("addresses-toggle", ix))
+                                .text_sm()
+                                .cursor_pointer()
+                                .text_color(cx.theme().muted_foreground)
+                                .hover(|style| style.underline())
+                                .child(if expanded {
+                                    "Show fewer".to_string()
+                                } else {
+                                    format!("+ {} more", total - shown)
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    if !this.expanded.remove(&slug) {
+                                        this.expanded.insert(slug.clone());
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                    });
                     v_flex()
                         .gap_0p5()
-                        .children(view.project.routes.iter().enumerate().map(|(route_ix, r)| {
-                            let host =
-                                r.hostname(&view.project.slug, &snapshot.settings.domain_suffix);
-                            let url = view
-                                .status
-                                .urls
-                                .get(route_ix)
-                                .cloned()
-                                .unwrap_or_else(|| address_url(snapshot, &host));
-                            h_flex()
-                                .gap_2()
-                                .child(link(
-                                    format!("list-{}-{route_ix}", view.project.slug),
-                                    format!("{host}{}", r.path_prefix.as_deref().unwrap_or("")),
-                                    url,
-                                    cx,
-                                ))
-                                .child(
-                                    mono(format!("→ {}", r.port), cx)
-                                        .text_color(cx.theme().muted_foreground),
-                                )
-                        }))
+                        .children(view.project.routes.iter().enumerate().take(shown).map(
+                            |(route_ix, r)| {
+                                let host = r
+                                    .hostname(&view.project.slug, &snapshot.settings.domain_suffix);
+                                let url = view
+                                    .status
+                                    .urls
+                                    .get(route_ix)
+                                    .cloned()
+                                    .unwrap_or_else(|| address_url(snapshot, &host));
+                                h_flex()
+                                    .gap_2()
+                                    .child(link(
+                                        format!("list-{}-{route_ix}", view.project.slug),
+                                        format!("{host}{}", r.path_prefix.as_deref().unwrap_or("")),
+                                        url,
+                                        cx,
+                                    ))
+                                    .child(
+                                        mono(format!("→ {}", r.port), cx)
+                                            .text_color(cx.theme().muted_foreground),
+                                    )
+                            },
+                        ))
+                        .children(toggle)
                 };
                 h_flex()
                     .id(("project-row", ix))
@@ -731,7 +775,11 @@ impl Shell {
                             ),
                     )
                     .child(div().flex_1().min_w_0().child(addresses))
-                    .child(div().w(px(120.)).child(host_label(&view.project.host)))
+                    .child(
+                        div()
+                            .w(px(120.))
+                            .child(host_label(snapshot, &view.project.host)),
+                    )
                     .child(
                         h_flex().w(px(90.)).child(
                             Tag::secondary()
@@ -801,7 +849,7 @@ impl Shell {
                                         .text_color(cx.theme().muted_foreground),
                                 ),
                         )
-                        .child(div().w(px(120.)).child(host_label(&d.host)))
+                        .child(div().w(px(120.)).child(host_label(snapshot, &d.host)))
                         .child(
                             Button::new(("add-found", ix))
                                 .small()
@@ -1076,7 +1124,7 @@ impl Shell {
                             .gap_2()
                             .child(caption("Project", cx))
                             .child(field("Folder", mono(p.path.display().to_string(), cx), cx))
-                            .child(field("Host", host_label(&p.host), cx))
+                            .child(field("Host", host_label(snapshot, &p.host), cx))
                             .child(field(
                                 "Devcontainer",
                                 format!("{:?}", p.kind).to_lowercase(),

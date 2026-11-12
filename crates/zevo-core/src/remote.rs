@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::model::Host;
+use crate::model::{Host, HostDetails};
 use crate::runtime::{DockerRuntime, Runtime};
 use crate::store::Store;
 use crate::{Error, Result, programs, reconcile};
@@ -522,39 +522,50 @@ pub fn resolved_hostname(ssh_destination: &str) -> Option<String> {
         .filter(|name| !name.is_empty())
 }
 
-/// Registers a host after proving that SSH and Docker work on it. Returns
-/// the host and the Docker version found there.
-pub async fn register_host(
-    store: &Store,
-    ssh_destination: &str,
-    name: Option<&str>,
-    address: Option<&str>,
-    docker_socket: Option<&str>,
-    docker_command: Option<&str>,
-) -> Result<(Host, String)> {
-    let mut host = Host::from_ssh(ssh_destination, name, address)?;
+/// Builds a host from what was entered and proves that SSH and Docker work
+/// on it. Returns the host and the Docker version found there.
+async fn checked_host(details: &HostDetails) -> Result<(Host, String)> {
+    let given = |text: &str| Some(text.trim().to_string()).filter(|t| !t.is_empty());
+    let mut host = Host::from_ssh(
+        &details.ssh,
+        given(&details.name).as_deref(),
+        given(&details.address).as_deref(),
+    )?;
     // A name from the SSH config means nothing to Traefik; route to the
     // machine it stands for.
-    if address.is_none_or(|a| a.trim().is_empty())
+    if given(&details.address).is_none()
         && let Some(real) = resolved_hostname(&host.ssh)
     {
         host.address = real;
     }
-    host.docker_socket = docker_socket
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-    host.docker_command = docker_command
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+    host.docker_socket = given(&details.docker_socket);
+    host.docker_command = given(&details.docker_command);
+    host.projects_dir = crate::model::projects_dir(&details.projects_dir)?;
     let tunnel = Tunnel::open(&host)?;
     let version = tunnel.runtime()?.ping().await?;
     // Remember the socket that answered, so later connections go straight to it.
     if !tunnel.remote_socket().is_empty() {
         host.docker_socket = Some(tunnel.remote_socket().to_string());
     }
+    Ok((host, version))
+}
+
+/// Registers a host after proving that SSH and Docker work on it. Returns
+/// the host and the Docker version found there.
+pub async fn register_host(store: &Store, details: &HostDetails) -> Result<(Host, String)> {
+    let (host, version) = checked_host(details).await?;
     store.add_host(&host)?;
+    Ok((host, version))
+}
+
+/// Changes a registered host, after the same checks as adding one. Its id
+/// and edge port stay as they are, since projects and routes refer to them.
+pub async fn update_host(store: &Store, id: &str, details: &HostDetails) -> Result<(Host, String)> {
+    let existing = store.host(id)?;
+    let (mut host, version) = checked_host(details).await?;
+    host.id = existing.id;
+    host.edge_port = existing.edge_port;
+    store.update_host(&host)?;
     Ok((host, version))
 }
 

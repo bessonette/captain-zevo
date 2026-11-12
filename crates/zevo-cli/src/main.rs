@@ -8,7 +8,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use zevo_core::certs::{self, Issuer as _};
 use zevo_core::ide::{self, Editor};
-use zevo_core::model::{Host, LOCAL_HOST_ID, Route, Target};
+use zevo_core::model::{Host, HostDetails, LOCAL_HOST_ID, Route, Target};
 use zevo_core::reconcile::{self, Action, ContainerState, Report};
 use zevo_core::runtime::{DockerRuntime, Runtime};
 use zevo_core::store::Store;
@@ -175,6 +175,27 @@ enum HostCommand {
         /// wrapper and not a socket: a script, or "sudo -n docker".
         #[arg(long)]
         docker_command: Option<String>,
+        /// Folder there that holds your projects; only devcontainers inside
+        /// it are offered by `zevo discover`.
+        #[arg(long, value_name = "FOLDER")]
+        projects_dir: Option<String>,
+    },
+    /// Change a host. Options left out keep their value; pass an empty
+    /// value ("") to clear one.
+    Set {
+        id: String,
+        #[arg(long)]
+        ssh: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        address: Option<String>,
+        #[arg(long, conflicts_with = "docker_command")]
+        docker_socket: Option<String>,
+        #[arg(long)]
+        docker_command: Option<String>,
+        #[arg(long, value_name = "FOLDER")]
+        projects_dir: Option<String>,
     },
     /// List hosts and whether Docker answers on each.
     Ls,
@@ -403,16 +424,17 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 address,
                 docker_socket,
                 docker_command,
+                projects_dir,
             } => {
-                let (host, version) = remote::register_host(
-                    &store,
-                    &ssh,
-                    name.as_deref(),
-                    address.as_deref(),
-                    docker_socket.as_deref(),
-                    docker_command.as_deref(),
-                )
-                .await?;
+                let details = HostDetails {
+                    ssh,
+                    name: name.unwrap_or_default(),
+                    address: address.unwrap_or_default(),
+                    docker_socket: docker_socket.unwrap_or_default(),
+                    docker_command: docker_command.unwrap_or_default(),
+                    projects_dir: projects_dir.unwrap_or_default(),
+                };
+                let (host, version) = remote::register_host(&store, &details).await?;
                 println!(
                     "Added host '{}' ({version}), routed at {}.",
                     host.id, host.address
@@ -425,6 +447,39 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 println!(
                     "Add its projects with: zevo add --host {} <folder on that machine>",
                     host.id
+                );
+            }
+            HostCommand::Set {
+                id,
+                ssh,
+                name,
+                address,
+                docker_socket,
+                docker_command,
+                projects_dir,
+            } => {
+                let host = store.host(&id)?;
+                // Choosing one way to reach Docker drops the other.
+                let (socket, command) = match (docker_socket, docker_command) {
+                    (Some(socket), None) => (socket, String::new()),
+                    (None, Some(command)) => (String::new(), command),
+                    _ => (
+                        host.docker_socket.unwrap_or_default(),
+                        host.docker_command.unwrap_or_default(),
+                    ),
+                };
+                let details = HostDetails {
+                    ssh: ssh.unwrap_or(host.ssh),
+                    name: name.unwrap_or(host.name),
+                    address: address.unwrap_or(host.address),
+                    docker_socket: socket,
+                    docker_command: command,
+                    projects_dir: projects_dir.or(host.projects_dir).unwrap_or_default(),
+                };
+                let (host, version) = remote::update_host(&store, &id, &details).await?;
+                println!(
+                    "Saved host '{}' ({version}), routed at {}.",
+                    host.id, host.address
                 );
             }
             HostCommand::Ls => {

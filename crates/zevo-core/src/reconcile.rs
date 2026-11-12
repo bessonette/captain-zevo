@@ -90,8 +90,15 @@ pub struct Discovered {
 }
 
 /// Devcontainers whose folder no registered project uses, one per folder
-/// (a running container wins), sorted by folder.
-pub fn discover(host: &str, containers: &[ContainerInfo], projects: &[Project]) -> Vec<Discovered> {
+/// (a running container wins), sorted by folder. `within` limits them to
+/// those inside one folder.
+pub fn discover(
+    host: &str,
+    containers: &[ContainerInfo],
+    projects: &[Project],
+    within: Option<&str>,
+) -> Vec<Discovered> {
+    let within = within.map(|dir| normalize(Path::new(dir)));
     let registered: Vec<String> = projects
         .iter()
         .filter(|p| p.host == host)
@@ -104,6 +111,13 @@ pub fn discover(host: &str, containers: &[ContainerInfo], projects: &[Project]) 
         };
         let key = normalize(Path::new(folder));
         if registered.contains(&key) {
+            continue;
+        }
+        if let Some(dir) = &within
+            && dir != "/"
+            && key != *dir
+            && !key.starts_with(&format!("{dir}/"))
+        {
             continue;
         }
         let candidate = Discovered {
@@ -263,7 +277,7 @@ pub async fn reconcile_hosts(
     };
 
     if let Some(containers) = &containers {
-        report.discovered = discover(LOCAL_HOST_ID, containers, &projects);
+        report.discovered = discover(LOCAL_HOST_ID, containers, &projects, None);
     }
     // Remote hosts: connect-level problems are reported once per host, and a
     // host that is reachable gets its network and edge Traefik prepared.
@@ -311,9 +325,12 @@ pub async fn reconcile_hosts(
         }
         match rt.containers().await {
             Ok(containers) => {
-                report
-                    .discovered
-                    .extend(discover(&host.id, &containers, &projects));
+                report.discovered.extend(discover(
+                    &host.id,
+                    &containers,
+                    &projects,
+                    host.projects_dir.as_deref(),
+                ));
                 // Kept even without projects, so files a removed project
                 // left in the edge are cleaned up.
                 remote.insert(
@@ -864,6 +881,28 @@ mod tests {
             found,
             [("/work/blog/", "vsc-blog"), ("/work/docs", "vsc-docs-new")]
         );
+    }
+
+    #[test]
+    fn discovery_can_be_limited_to_one_folder() {
+        let containers = [
+            devcontainer("a", "/home/me/Projects/shop"),
+            devcontainer("b", "/home/me/Projects/kindly/app/"),
+            devcontainer("c", "/home/me/Projects-old/blog"),
+            devcontainer("d", "/srv/other"),
+        ];
+        let folders = |within| -> Vec<String> {
+            discover("box", &containers, &[], within)
+                .iter()
+                .map(|d| d.folder.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(folders(None).len(), 4);
+        assert_eq!(
+            folders(Some("/home/me/Projects/")),
+            ["/home/me/Projects/kindly/app/", "/home/me/Projects/shop"]
+        );
+        assert_eq!(folders(Some("/")).len(), 4);
     }
 
     #[tokio::test]

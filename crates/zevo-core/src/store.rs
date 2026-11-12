@@ -169,6 +169,17 @@ impl Store {
         write_toml(&self.host_path(&host.id), host)
     }
 
+    /// Saves changes to a registered host.
+    pub fn update_host(&self, host: &Host) -> Result<()> {
+        if !self.host_path(&host.id).exists() {
+            return Err(Error::Other(format!(
+                "host '{}' is not registered",
+                host.id
+            )));
+        }
+        write_toml(&self.host_path(&host.id), host)
+    }
+
     /// Removes a host that no project uses.
     pub fn remove_host(&self, id: &str) -> Result<()> {
         validate_slug(id)?;

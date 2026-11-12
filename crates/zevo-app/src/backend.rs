@@ -13,8 +13,8 @@ use zevo_core::health::Listening;
 use zevo_core::ide::{self, Editor};
 use zevo_core::lifecycle;
 use zevo_core::model::{
-    DevcontainerKind, Host, LOCAL_HOST_ID, Project, Route, Settings, Target, TraefikMode,
-    TraefikSettings,
+    DevcontainerKind, Host, HostDetails, LOCAL_HOST_ID, Project, Route, Settings, Target,
+    TraefikMode, TraefikSettings,
 };
 use zevo_core::reconcile::{self, ContainerState, Discovered, ProjectStatus};
 use zevo_core::register;
@@ -113,14 +113,9 @@ pub trait Backend: Send + Sync + 'static {
     ) -> Result<String, String>;
     /// Registers a remote host after checking that Docker answers on it.
     /// `docker_socket` may be empty, in which case Zevo looks for it.
-    fn add_host(
-        &self,
-        ssh: &str,
-        name: &str,
-        address: &str,
-        docker_socket: &str,
-        docker_command: &str,
-    ) -> Result<(), String>;
+    fn add_host(&self, details: &HostDetails) -> Result<(), String>;
+    /// Saves changes to a host, after the same check.
+    fn update_host(&self, id: &str, details: &HostDetails) -> Result<(), String>;
     /// Unregisters a host and removes its edge Traefik. `Ok(Some(note))`
     /// when the host was removed but something was left behind there.
     fn remove_host(&self, id: &str) -> Result<Option<String>, String>;
@@ -372,25 +367,20 @@ impl Backend for SystemBackend {
             .map_err(|e| e.to_string())
     }
 
-    fn add_host(
-        &self,
-        ssh: &str,
-        name: &str,
-        address: &str,
-        docker_socket: &str,
-        docker_command: &str,
-    ) -> Result<(), String> {
+    fn add_host(&self, details: &HostDetails) -> Result<(), String> {
         self.tokio
-            .block_on(remote::register_host(
-                &self.store,
-                ssh,
-                Some(name),
-                Some(address),
-                Some(docker_socket),
-                Some(docker_command),
-            ))
+            .block_on(remote::register_host(&self.store, details))
             .map(|_| ())
             .map_err(|e| e.to_string())
+    }
+
+    fn update_host(&self, id: &str, details: &HostDetails) -> Result<(), String> {
+        self.tokio
+            .block_on(remote::update_host(&self.store, id, details))
+            .map_err(|e| e.to_string())?;
+        // The connection may have been opened with the old details.
+        self.links.lock().unwrap().remove(id);
+        Ok(())
     }
 
     fn remove_host(&self, id: &str) -> Result<Option<String>, String> {
@@ -809,20 +799,25 @@ impl Backend for DemoBackend {
         Ok(format!("{}/{slug}", parent.trim().trim_end_matches('/')))
     }
 
-    fn add_host(
-        &self,
-        ssh: &str,
-        name: &str,
-        address: &str,
-        _docker_socket: &str,
-        _docker_command: &str,
-    ) -> Result<(), String> {
-        let host = Host::from_ssh(ssh, Some(name), Some(address)).map_err(|e| e.to_string())?;
+    fn add_host(&self, details: &HostDetails) -> Result<(), String> {
+        let host = demo_host(details)?;
         let mut hosts = self.hosts.lock().unwrap();
         if hosts.iter().any(|h| h.id == host.id) {
             return Err(format!("host '{}' is already registered", host.id));
         }
         hosts.push(host);
+        Ok(())
+    }
+
+    fn update_host(&self, id: &str, details: &HostDetails) -> Result<(), String> {
+        let mut host = demo_host(details)?;
+        let mut hosts = self.hosts.lock().unwrap();
+        let existing = hosts
+            .iter_mut()
+            .find(|h| h.id == id)
+            .ok_or_else(|| format!("host '{id}' is not registered"))?;
+        host.id = existing.id.clone();
+        *existing = host;
         Ok(())
     }
 
@@ -962,6 +957,15 @@ impl Backend for DemoBackend {
             "> dev\n> vite --host 0.0.0.0 --port {port}\n\n  VITE ready in 412 ms\n\n  \u{279c}  Local:   http://localhost:{port}/\n  \u{279c}  Network: http://172.18.0.4:{port}/\n12:04:19 GET / 200 14ms\n12:04:19 GET /assets/app.css 200 3ms\n12:05:02 GET /health 200 1ms\n"
         ))
     }
+}
+
+/// A host as the example data keeps it: built from the form, not checked.
+fn demo_host(details: &HostDetails) -> Result<Host, String> {
+    let mut host = Host::from_ssh(&details.ssh, Some(&details.name), Some(&details.address))
+        .map_err(|e| e.to_string())?;
+    host.projects_dir =
+        zevo_core::model::projects_dir(&details.projects_dir).map_err(|e| e.to_string())?;
+    Ok(host)
 }
 
 #[cfg(test)]

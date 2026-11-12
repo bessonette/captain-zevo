@@ -10,6 +10,7 @@ use gpui_kit::*;
 
 use super::{Page, Shell, caption, mono};
 use crate::backend::Snapshot;
+use zevo_core::model::HostDetails;
 
 /// The "add a host" form.
 pub(super) struct HostForm {
@@ -18,8 +19,24 @@ pub(super) struct HostForm {
     address: Entity<InputState>,
     docker_socket: Entity<InputState>,
     docker_command: Entity<InputState>,
+    projects_dir: Entity<InputState>,
+    /// Id of the host being changed; `None` while adding one.
+    editing: Option<String>,
     error: Option<String>,
     busy: bool,
+}
+
+impl HostForm {
+    fn inputs(&self) -> [&Entity<InputState>; 6] {
+        [
+            &self.ssh,
+            &self.name,
+            &self.address,
+            &self.docker_socket,
+            &self.docker_command,
+            &self.projects_dir,
+        ]
+    }
 }
 
 impl Shell {
@@ -34,6 +51,8 @@ impl Shell {
                 address: input("optional", window, cx),
                 docker_socket: input("found automatically", window, cx),
                 docker_command: input("e.g. ~/tools/docker.sh", window, cx),
+                projects_dir: input("optional, e.g. /home/me/Projects", window, cx),
+                editing: None,
                 error: None,
                 busy: false,
             });
@@ -41,23 +60,79 @@ impl Shell {
         self.go(Page::Hosts, cx);
     }
 
+    /// Fills the form with a host's details so they can be changed.
+    fn edit_host(
+        &mut self,
+        host: &zevo_core::model::Host,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(form) = &mut self.host_form else {
+            return;
+        };
+        let values = [
+            host.ssh.clone(),
+            host.name.clone(),
+            host.address.clone(),
+            host.docker_socket.clone().unwrap_or_default(),
+            host.docker_command.clone().unwrap_or_default(),
+            host.projects_dir.clone().unwrap_or_default(),
+        ];
+        // A stored command takes precedence over the socket Zevo found, so
+        // show only the one in use.
+        let socket_unused = host.docker_command.is_some();
+        for (ix, (input, value)) in form.inputs().into_iter().zip(values).enumerate() {
+            let value = if ix == 3 && socket_unused {
+                String::new()
+            } else {
+                value
+            };
+            input.update(cx, |i, cx| i.set_value(value, window, cx));
+        }
+        form.editing = Some(host.id.clone());
+        form.error = None;
+        cx.notify();
+    }
+
+    /// Empties the form and returns it to adding a host.
+    fn reset_host_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(form) = &mut self.host_form else {
+            return;
+        };
+        for input in form.inputs() {
+            input.update(cx, |i, cx| i.set_value("", window, cx));
+        }
+        form.editing = None;
+        form.error = None;
+        cx.notify();
+    }
+
     fn submit_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(form) = &mut self.host_form else {
             return;
         };
-        let ssh = form.ssh.read(cx).value().to_string();
-        let name = form.name.read(cx).value().to_string();
-        let address = form.address.read(cx).value().to_string();
-        let docker_socket = form.docker_socket.read(cx).value().to_string();
-        let docker_command = form.docker_command.read(cx).value().to_string();
+        let text = |input: &Entity<InputState>| input.read(cx).value().to_string();
+        let details = HostDetails {
+            ssh: text(&form.ssh),
+            name: text(&form.name),
+            address: text(&form.address),
+            docker_socket: text(&form.docker_socket),
+            docker_command: text(&form.docker_command),
+            projects_dir: text(&form.projects_dir),
+        };
+        let editing = form.editing.clone();
         form.busy = true;
         form.error = None;
         let backend = self.backend.clone();
         cx.spawn_in(window, async move |this, cx| {
             // Connecting over SSH can take several seconds.
+            let saved = editing.is_some();
             let result = cx
                 .background_spawn(async move {
-                    backend.add_host(&ssh, &name, &address, &docker_socket, &docker_command)
+                    match editing {
+                        Some(id) => backend.update_host(&id, &details),
+                        None => backend.add_host(&details),
+                    }
                 })
                 .await;
             _ = this.update_in(cx, |this, window, cx| {
@@ -67,16 +142,9 @@ impl Shell {
                 form.busy = false;
                 match result {
                     Ok(()) => {
-                        for input in [
-                            &form.ssh,
-                            &form.name,
-                            &form.address,
-                            &form.docker_socket,
-                            &form.docker_command,
-                        ] {
-                            input.update(cx, |i, cx| i.set_value("", window, cx));
-                        }
-                        window.push_notification("Host added", cx);
+                        this.reset_host_form(window, cx);
+                        window
+                            .push_notification(if saved { "Host saved" } else { "Host added" }, cx);
                         this.reload_now(cx);
                     }
                     Err(e) => form.error = Some(e),
@@ -114,7 +182,7 @@ impl Shell {
                     .child(caption("SSH", cx).w(px(210.)))
                     .child(caption("Docker", cx).flex_1())
                     .child(caption("Projects", cx).w(px(80.)))
-                    .child(div().w(px(32.))),
+                    .child(div().w(px(68.))),
             )
             .child(
                 h_flex()
@@ -148,10 +216,11 @@ impl Shell {
                                 .to_string(),
                         ),
                     )
-                    .child(div().w(px(32.))),
+                    .child(div().w(px(68.))),
             )
             .children(snapshot.hosts.iter().enumerate().map(|(ix, view)| {
                 let id = view.host.id.clone();
+                let host = view.host.clone();
                 let projects = snapshot
                     .projects
                     .iter()
@@ -178,7 +247,10 @@ impl Shell {
                             .child(
                                 mono(view.host.address.clone(), cx)
                                     .text_color(cx.theme().muted_foreground),
-                            ),
+                            )
+                            .when_some(view.host.projects_dir.clone(), |col, dir| {
+                                col.child(mono(dir, cx).text_color(cx.theme().muted_foreground))
+                            }),
                     )
                     .child(mono(view.host.ssh.clone(), cx).w(px(210.)))
                     .child(
@@ -198,18 +270,33 @@ impl Shell {
                             .child(div().min_w_0().child(text)),
                     )
                     .child(div().w(px(80.)).child(projects.to_string()))
-                    .child(div().w(px(32.)).when(projects == 0, |cell| {
-                        cell.child(
-                            Button::new(("remove-host", ix))
-                                .ghost()
-                                .small()
-                                .icon(IconName::Close)
-                                .tooltip("Remove this host")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.remove_host(id.clone(), window, cx)
-                                })),
-                        )
-                    }))
+                    .child(
+                        h_flex()
+                            .w(px(68.))
+                            .gap_1()
+                            .child(
+                                Button::new(("edit-host", ix))
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::Settings)
+                                    .tooltip("Change this host")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.edit_host(&host, window, cx)
+                                    })),
+                            )
+                            .when(projects == 0, |cell| {
+                                cell.child(
+                                    Button::new(("remove-host", ix))
+                                        .ghost()
+                                        .small()
+                                        .icon(IconName::Close)
+                                        .tooltip("Remove this host")
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.remove_host(id.clone(), window, cx)
+                                        })),
+                                )
+                            }),
+                    )
             }));
 
         let form = self.host_form.as_ref().map(|form| {
@@ -220,9 +307,19 @@ impl Shell {
                     .child(div().text_sm().text_color(cx.theme().muted_foreground).child(label))
                     .child(Input::new(input))
             };
+            let editing = form.editing.as_ref().map(|id| {
+                snapshot
+                    .hosts
+                    .iter()
+                    .find(|h| &h.host.id == id)
+                    .map_or_else(|| id.clone(), |h| h.host.name.clone())
+            });
             v_flex()
                 .gap_3()
-                .child(caption("Add a host", cx))
+                .child(caption(if editing.is_some() { "Change a host" } else { "Add a host" }, cx))
+                .when_some(editing.clone(), |col, name| {
+                    col.child(div().font_weight(FontWeight::MEDIUM).child(name))
+                })
                 .child(div().max_w(px(640.)).text_color(cx.theme().muted_foreground).child(
                     "A machine you can reach with SSH keys (Zevo cannot type a password). It needs Docker; \
                      Zevo starts one small container there, zevo-edge, to route to its projects. The address can be a name; Zevo follows it if the machine's IP changes.",
@@ -250,15 +347,33 @@ impl Shell {
                                 .child(labelled("or Docker command", &form.docker_command, 230.)),
                         ),
                 )
-                .child(h_flex().child(
-                    Button::new("add-host")
-                        .primary()
-                        .label("Add host")
-                        .loading(form.busy)
-                        .on_click(cx.listener(|this, _, window, cx| this.submit_host(window, cx))),
-                ))
+                .child(
+                    v_flex()
+                        .gap_1p5()
+                        .child(div().max_w(px(640.)).text_sm().text_color(cx.theme().muted_foreground).child(
+                            "If your projects there live under one folder, name it: only devcontainers \
+                             inside it are offered for adding.",
+                        ))
+                        .child(labelled("Projects folder", &form.projects_dir, 475.)),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("add-host")
+                                .primary()
+                                .label(if editing.is_some() { "Save host" } else { "Add host" })
+                                .loading(form.busy)
+                                .on_click(cx.listener(|this, _, window, cx| this.submit_host(window, cx))),
+                        )
+                        .when(editing.is_some(), |row| {
+                            row.child(Button::new("cancel-host").ghost().label("Cancel").on_click(
+                                cx.listener(|this, _, window, cx| this.reset_host_form(window, cx)),
+                            ))
+                        }),
+                )
                 .when_some(form.error.clone(), |col, e| {
-                    col.child(Alert::error("host-error", e).title("Could not add the host"))
+                    col.child(Alert::error("host-error", e).title("Could not save the host"))
                 })
         });
 

@@ -238,6 +238,38 @@ pub struct Host {
     /// Port of the host's edge Traefik.
     #[serde(default = "default_edge_port")]
     pub edge_port: u16,
+    /// Folder on the host that holds its projects. When set, only
+    /// devcontainers inside it are offered for adding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projects_dir: Option<String>,
+}
+
+/// What a person enters to add or change a host. Empty strings mean "not
+/// given".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostDetails {
+    pub ssh: String,
+    pub name: String,
+    pub address: String,
+    pub docker_socket: String,
+    pub docker_command: String,
+    pub projects_dir: String,
+}
+
+/// Checks a projects folder and tidies it: an absolute path on the host,
+/// without a trailing slash. Empty means none.
+pub fn projects_dir(input: &str) -> Result<Option<String>> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if !trimmed.starts_with('/') {
+        return Err(Error::Other(format!(
+            "'{trimmed}' is not a full path on the host; start it with /"
+        )));
+    }
+    let tidy = trimmed.trim_end_matches('/');
+    Ok(Some(if tidy.is_empty() { "/" } else { tidy }.to_string()))
 }
 
 fn default_edge_port() -> u16 {
@@ -284,6 +316,7 @@ impl Host {
             docker_socket: None,
             docker_command: None,
             edge_port: DEFAULT_EDGE_PORT,
+            projects_dir: None,
         })
     }
 }
@@ -348,6 +381,12 @@ mod tests {
         );
         assert_eq!(h.edge_port, DEFAULT_EDGE_PORT);
         // Nothing that ssh could read as an option or a command.
+        assert_eq!(projects_dir("  ").unwrap(), None);
+        assert_eq!(
+            projects_dir(" /home/me/Projects/ ").unwrap().as_deref(),
+            Some("/home/me/Projects")
+        );
+        assert!(projects_dir("Projects").is_err());
         assert!(Host::from_ssh("-oProxyCommand=evil", None, None).is_err());
         assert!(Host::from_ssh("host; rm -rf /", None, None).is_err());
         assert!(Host::from_ssh("me@box", Some("local"), None).is_err());
