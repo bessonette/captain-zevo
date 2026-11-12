@@ -26,10 +26,49 @@ impl DockerRuntime {
     /// Connects using `DOCKER_HOST` if set, otherwise the platform's default
     /// socket or named pipe. Connection errors surface on first use.
     pub fn connect() -> Result<Self> {
+        if std::env::var_os("DOCKER_HOST").is_none()
+            && let Some(socket) = fallback_socket()
+        {
+            return Docker::connect_with_socket(
+                &socket.to_string_lossy(),
+                120,
+                bollard::API_DEFAULT_VERSION,
+            )
+            .map(|docker| Self { docker })
+            .map_err(err);
+        }
         Docker::connect_with_defaults()
             .map(|docker| Self { docker })
             .map_err(err)
     }
+}
+
+/// When the standard socket is absent, the per-user socket of whichever
+/// runtime is installed (Docker Desktop, OrbStack, Colima, Rancher Desktop,
+/// rootless Podman).
+#[cfg(unix)]
+fn fallback_socket() -> Option<std::path::PathBuf> {
+    use std::path::{Path, PathBuf};
+    if Path::new("/var/run/docker.sock").exists() {
+        return None;
+    }
+    let home = directories::BaseDirs::new()?.home_dir().to_path_buf();
+    let mut candidates = vec![
+        home.join(".docker/run/docker.sock"),
+        home.join(".orbstack/run/docker.sock"),
+        home.join(".colima/default/docker.sock"),
+        home.join(".rd/docker.sock"),
+    ];
+    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+        candidates.push(PathBuf::from(&runtime_dir).join("docker.sock"));
+        candidates.push(PathBuf::from(&runtime_dir).join("podman/podman.sock"));
+    }
+    candidates.into_iter().find(|p| p.exists())
+}
+
+#[cfg(not(unix))]
+fn fallback_socket() -> Option<std::path::PathBuf> {
+    None
 }
 
 fn err(e: bollard::errors::Error) -> Error {

@@ -3,3 +3,4 @@
 .DS_Store
 # Claude Code state kept across devcontainer rebuilds (contains credentials)
 /.claude-home/
+/dist

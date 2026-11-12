@@ -185,6 +185,15 @@ routes, and refreshes every few seconds. `--demo --fresh` shows the first-run
 screen. On Linux it needs the libraries listed in
 [.devcontainer/devcontainer.json](.devcontainer/devcontainer.json).
 
+### Installing the app on macOS
+
+```sh
+scripts/bundle-macos.sh --install
+```
+
+This builds `Captain Zevo.app` with its icon and copies it to `/Applications`.
+It is signed for the Mac that built it only.
+
 ## Development
 
 ```sh
@@ -197,10 +206,11 @@ The repository includes a devcontainer. Core logic is tested against an
 in-memory runtime, so the test suite needs no Docker daemon. See
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Logo
+## Logo and icon
 
-The logo is the single file [assets/logo.svg](assets/logo.svg). Replace that file to
-change it everywhere; the README and the desktop app both read it.
+The logo is the single file [assets/logo.svg](assets/logo.svg). Replace it,
+then run `scripts/make-icons.sh` to rebuild the app icon files in
+`assets/icons` from it. The README and the desktop app read the logo directly.
 
 ## License
 

@@ -29,11 +29,32 @@ pub trait Issuer: Send + Sync {
 /// Issues certificates by running the `mkcert` command.
 pub struct Mkcert;
 
+/// `mkcert` on the PATH, or in the usual install locations: an app started
+/// from the Finder or a desktop launcher does not get the shell's PATH.
+fn mkcert() -> Command {
+    let on_path = std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("mkcert").is_file()));
+    if !on_path {
+        let home = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf());
+        let candidates = [
+            Some(PathBuf::from("/opt/homebrew/bin/mkcert")),
+            Some(PathBuf::from("/usr/local/bin/mkcert")),
+            Some(PathBuf::from("/home/linuxbrew/.linuxbrew/bin/mkcert")),
+            home.as_ref().map(|h| h.join(".local/bin/mkcert")),
+            home.as_ref().map(|h| h.join("go/bin/mkcert")),
+        ];
+        if let Some(found) = candidates.into_iter().flatten().find(|p| p.is_file()) {
+            return Command::new(found);
+        }
+    }
+    Command::new("mkcert")
+}
+
 impl Issuer for Mkcert {
     fn ready(&self) -> std::result::Result<(), String> {
         let not_installed = "mkcert is not installed. Install it (macOS: `brew install mkcert`; \
                              others: https://github.com/FiloSottile/mkcert), then run `mkcert -install`";
-        let output = Command::new("mkcert")
+        let output = mkcert()
             .arg("-CAROOT")
             .output()
             .map_err(|_| not_installed.to_string())?;
@@ -52,7 +73,7 @@ impl Issuer for Mkcert {
     }
 
     fn issue(&self, names: &[String], cert: &Path, key: &Path) -> Result<()> {
-        let output = Command::new("mkcert")
+        let output = mkcert()
             .arg("-cert-file")
             .arg(cert)
             .arg("-key-file")
