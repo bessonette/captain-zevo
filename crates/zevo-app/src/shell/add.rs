@@ -11,7 +11,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use zevo_core::model::{Project, Route, Target};
 
-use super::{Page, Shell, caption, field, mono};
+use super::{Page, Shell, caption, field, host_label, mono};
 use crate::backend::Snapshot;
 
 struct RouteRow {
@@ -322,7 +322,7 @@ impl Shell {
                 )
                 .child(match self.add.as_ref().map(|f| f.host.as_str()) {
                     Some(host) if host != zevo_core::model::LOCAL_HOST_ID => {
-                        format!("Add project on {host}")
+                        format!("Add project on {}", host_label(snapshot, host))
                     }
                     _ => "Add project".to_string(),
                 }),

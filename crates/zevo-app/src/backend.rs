@@ -147,6 +147,8 @@ pub struct SystemBackend {
     tokio: tokio::runtime::Runtime,
     /// SSH connections to remote hosts, kept open between loads.
     links: Mutex<BTreeMap<String, Link>>,
+    /// The connection details each link was opened with, by host id.
+    opened_with: Mutex<BTreeMap<String, String>>,
 }
 
 /// The state of the connection to one remote host.
@@ -182,8 +184,25 @@ impl SystemBackend {
         Ok((Some(tunnel), runtime))
     }
 
-    fn refresh_links(links: &mut BTreeMap<String, Link>, hosts: &[Host]) {
-        links.retain(|id, _| hosts.iter().any(|h| &h.id == id));
+    fn refresh_links(
+        links: &mut BTreeMap<String, Link>,
+        opened_with: &mut BTreeMap<String, String>,
+        hosts: &[Host],
+    ) {
+        // What a connection depends on. A host whose details were changed
+        // gets a new one, or Zevo would keep talking to the old machine.
+        let key = |host: &Host| {
+            format!(
+                "{}\n{:?}\n{:?}",
+                host.ssh, host.docker_socket, host.docker_command
+            )
+        };
+        links.retain(|id, _| {
+            hosts
+                .iter()
+                .any(|h| &h.id == id && opened_with.get(id) == Some(&key(h)))
+        });
+        opened_with.retain(|id, _| links.contains_key(id));
         let to_open: Vec<Host> = hosts
             .iter()
             .filter(|host| match links.get_mut(&host.id) {
@@ -194,6 +213,9 @@ impl SystemBackend {
             .cloned()
             .collect();
         // Together, so one unreachable machine does not hold up the rest.
+        for host in &to_open {
+            opened_with.insert(host.id.clone(), key(host));
+        }
         for (id, opened) in remote::open_all(&to_open) {
             links.insert(
                 id,
@@ -216,6 +238,7 @@ impl SystemBackend {
                 .build()
                 .map_err(|e| e.to_string())?,
             links: Mutex::new(BTreeMap::new()),
+            opened_with: Mutex::new(BTreeMap::new()),
         })
     }
 }
@@ -239,7 +262,7 @@ impl Backend for SystemBackend {
             // connections can be taken out for the length of this one.
             let hosts = self.store.hosts().map_err(|e| e.to_string())?;
             let mut links = std::mem::take(&mut *self.links.lock().unwrap());
-            Self::refresh_links(&mut links, &hosts);
+            Self::refresh_links(&mut links, &mut self.opened_with.lock().unwrap(), &hosts);
             let mut remotes = reconcile::RemoteRuntimes::new();
             let mut host_views = Vec::new();
             for host in &hosts {
@@ -377,10 +400,8 @@ impl Backend for SystemBackend {
     fn update_host(&self, id: &str, details: &HostDetails) -> Result<(), String> {
         self.tokio
             .block_on(remote::update_host(&self.store, id, details))
-            .map_err(|e| e.to_string())?;
-        // The connection may have been opened with the old details.
-        self.links.lock().unwrap().remove(id);
-        Ok(())
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 
     fn remove_host(&self, id: &str) -> Result<Option<String>, String> {

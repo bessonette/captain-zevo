@@ -70,23 +70,21 @@ impl Shell {
         let Some(form) = &mut self.host_form else {
             return;
         };
+        // A stored command takes precedence over the socket Zevo found, so
+        // show only the one in use.
+        let socket = match host.docker_command {
+            Some(_) => None,
+            None => host.docker_socket.clone(),
+        };
         let values = [
             host.ssh.clone(),
             host.name.clone(),
             host.address.clone(),
-            host.docker_socket.clone().unwrap_or_default(),
+            socket.unwrap_or_default(),
             host.docker_command.clone().unwrap_or_default(),
             host.projects_dir.clone().unwrap_or_default(),
         ];
-        // A stored command takes precedence over the socket Zevo found, so
-        // show only the one in use.
-        let socket_unused = host.docker_command.is_some();
-        for (ix, (input, value)) in form.inputs().into_iter().zip(values).enumerate() {
-            let value = if ix == 3 && socket_unused {
-                String::new()
-            } else {
-                value
-            };
+        for (input, value) in form.inputs().into_iter().zip(values) {
             input.update(cx, |i, cx| i.set_value(value, window, cx));
         }
         form.editing = Some(host.id.clone());

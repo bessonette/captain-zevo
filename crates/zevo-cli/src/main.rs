@@ -459,19 +459,29 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 projects_dir,
             } => {
                 let host = store.host(&id)?;
+                // Another machine: the address and the socket found on the
+                // old one no longer apply, unless given again.
+                let moved = ssh.as_ref().is_some_and(|ssh| ssh.trim() != host.ssh);
+                let kept = |value: Option<String>| {
+                    if moved {
+                        String::new()
+                    } else {
+                        value.unwrap_or_default()
+                    }
+                };
                 // Choosing one way to reach Docker drops the other.
                 let (socket, command) = match (docker_socket, docker_command) {
                     (Some(socket), None) => (socket, String::new()),
                     (None, Some(command)) => (String::new(), command),
                     _ => (
-                        host.docker_socket.unwrap_or_default(),
+                        kept(host.docker_socket),
                         host.docker_command.unwrap_or_default(),
                     ),
                 };
                 let details = HostDetails {
                     ssh: ssh.unwrap_or(host.ssh),
                     name: name.unwrap_or(host.name),
-                    address: address.unwrap_or(host.address),
+                    address: address.unwrap_or_else(|| kept(Some(host.address))),
                     docker_socket: socket,
                     docker_command: command,
                     projects_dir: projects_dir.or(host.projects_dir).unwrap_or_default(),
