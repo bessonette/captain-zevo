@@ -99,7 +99,9 @@ pub trait Backend: Send + Sync + 'static {
     fn draft(&self, host: &str, folder: &str) -> Result<Project, String>;
     /// Registers a remote host after checking that Docker answers on it.
     fn add_host(&self, ssh: &str, name: &str, address: &str) -> Result<(), String>;
-    fn remove_host(&self, id: &str) -> Result<(), String>;
+    /// Unregisters a host and removes its edge Traefik. `Ok(Some(note))`
+    /// when the host was removed but something was left behind there.
+    fn remove_host(&self, id: &str) -> Result<Option<String>, String>;
     fn add_project(&self, project: &Project) -> Result<(), String>;
     /// Saves changes to an existing project.
     fn save_project(&self, project: &Project) -> Result<(), String>;
@@ -137,22 +139,23 @@ impl SystemBackend {
     /// ones, reopens dead ones, and drops those for removed hosts.
     fn refresh_links(links: &mut BTreeMap<String, Link>, hosts: &[Host]) {
         links.retain(|id, _| hosts.iter().any(|h| &h.id == id));
-        for host in hosts {
-            let usable = match links.get_mut(&host.id) {
-                Some(Link::Open(tunnel, _)) => tunnel.alive(),
-                Some(Link::Failed(at, _)) => at.elapsed() < RETRY_AFTER,
-                None => false,
-            };
-            if usable {
-                continue;
-            }
-            let opened = remote::Tunnel::open(host).and_then(|tunnel| {
-                let runtime = tunnel.runtime()?;
-                Ok(Link::Open(tunnel, runtime))
-            });
+        let to_open: Vec<Host> = hosts
+            .iter()
+            .filter(|host| match links.get_mut(&host.id) {
+                Some(Link::Open(tunnel, _)) => !tunnel.alive(),
+                Some(Link::Failed(at, _)) => at.elapsed() >= RETRY_AFTER,
+                None => true,
+            })
+            .cloned()
+            .collect();
+        // Together, so one unreachable machine does not hold up the rest.
+        for (id, opened) in remote::open_all(&to_open) {
             links.insert(
-                host.id.clone(),
-                opened.unwrap_or_else(|e| Link::Failed(Instant::now(), e.to_string())),
+                id,
+                match opened {
+                    Ok((tunnel, runtime)) => Link::Open(tunnel, runtime),
+                    Err(e) => Link::Failed(Instant::now(), e),
+                },
             );
         }
     }
@@ -305,18 +308,21 @@ impl Backend for SystemBackend {
     }
 
     fn add_host(&self, ssh: &str, name: &str, address: &str) -> Result<(), String> {
-        let host = Host::from_ssh(ssh, Some(name), Some(address)).map_err(|e| e.to_string())?;
-        // Prove the connection before saving anything.
-        let tunnel = remote::Tunnel::open(&host).map_err(|e| e.to_string())?;
-        let runtime = tunnel.runtime().map_err(|e| e.to_string())?;
         self.tokio
-            .block_on(runtime.ping())
-            .map_err(|e| e.to_string())?;
-        self.store.add_host(&host).map_err(|e| e.to_string())
+            .block_on(remote::register_host(
+                &self.store,
+                ssh,
+                Some(name),
+                Some(address),
+            ))
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 
-    fn remove_host(&self, id: &str) -> Result<(), String> {
-        self.store.remove_host(id).map_err(|e| e.to_string())
+    fn remove_host(&self, id: &str) -> Result<Option<String>, String> {
+        self.tokio
+            .block_on(remote::forget_host(&self.store, id))
+            .map_err(|e| e.to_string())
     }
 
     fn add_project(&self, project: &Project) -> Result<(), String> {
@@ -675,7 +681,7 @@ impl Backend for DemoBackend {
         Ok(())
     }
 
-    fn remove_host(&self, id: &str) -> Result<(), String> {
+    fn remove_host(&self, id: &str) -> Result<Option<String>, String> {
         if self
             .projects
             .lock()
@@ -688,7 +694,7 @@ impl Backend for DemoBackend {
             ));
         }
         self.hosts.lock().unwrap().retain(|h| h.id != id);
-        Ok(())
+        Ok(None)
     }
 
     fn draft(&self, host: &str, folder: &str) -> Result<Project, String> {

@@ -291,7 +291,8 @@ fn has_header(content: &str) -> bool {
 }
 
 /// Slug encoded in a managed-looking file name (`zevo-<slug>.yml`).
-fn slug_from_name(name: &str) -> Option<&str> {
+/// The project slug a route file name belongs to, if it is one of Zevo's.
+pub fn slug_from_name(name: &str) -> Option<&str> {
     let slug = name.strip_prefix(FILE_PREFIX)?.strip_suffix(FILE_EXT)?;
     validate_slug(slug).ok().map(|_| slug)
 }

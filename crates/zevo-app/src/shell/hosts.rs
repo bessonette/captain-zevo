@@ -76,7 +76,12 @@ impl Shell {
 
     fn remove_host(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         match self.backend.remove_host(&id) {
-            Ok(()) => self.reload_now(cx),
+            Ok(note) => {
+                if let Some(note) = note {
+                    window.push_notification(note, cx);
+                }
+                self.reload_now(cx)
+            }
             Err(e) => window.push_notification(format!("Could not remove {id}: {e}"), cx),
         }
     }
@@ -124,7 +129,7 @@ impl Shell {
                             snapshot
                                 .projects
                                 .iter()
-                                .filter(|p| p.project.host == "local")
+                                .filter(|p| p.project.host == zevo_core::model::LOCAL_HOST_ID)
                                 .count()
                                 .to_string(),
                         ),

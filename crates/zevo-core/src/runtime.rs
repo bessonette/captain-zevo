@@ -108,6 +108,8 @@ pub trait Runtime: Send + Sync {
     /// Makes sure the edge Traefik exists and is running. Returns true if it
     /// had to be created or started.
     async fn ensure_edge(&self, spec: &EdgeSpec) -> Result<bool>;
+    /// Removes the edge Traefik and its routes volume, if Zevo created them.
+    async fn remove_edge(&self, container: &str, volume: &str) -> Result<()>;
     /// Text of a file inside a running container, or `None` if it is missing.
     async fn read_file(&self, container: &str, path: &str) -> Result<Option<String>>;
     async fn write_file(&self, container: &str, path: &str, content: &str) -> Result<()>;

@@ -300,12 +300,13 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         }
         Command::Host { command } => match command {
             HostCommand::Add { ssh, name, address } => {
-                let host = Host::from_ssh(&ssh, name.as_deref(), address.as_deref())?;
-                // Prove the connection before saving anything.
-                let tunnel = remote::Tunnel::open(&host)?;
-                let version = tunnel.runtime()?.ping().await?;
-                store.add_host(&host)?;
-                println!("Added host '{}' ({version}).", host.id);
+                let (host, version) =
+                    remote::register_host(&store, &ssh, name.as_deref(), address.as_deref())
+                        .await?;
+                println!(
+                    "Added host '{}' ({version}), routed at {}.",
+                    host.id, host.address
+                );
                 println!(
                     "Add its projects with: zevo add --host {} <folder on that machine>",
                     host.id
@@ -316,24 +317,26 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 if hosts.is_empty() {
                     println!("No remote hosts. Add one with: zevo host add user@address");
                 }
-                for host in hosts {
-                    let status = match remote::Tunnel::open(&host) {
-                        Ok(tunnel) => match tunnel.runtime() {
-                            Ok(rt) => rt.ping().await.unwrap_or_else(|e| e.to_string()),
-                            Err(e) => e.to_string(),
-                        },
-                        Err(e) => e.to_string(),
+                for (host, (_, opened)) in hosts.iter().zip(remote::open_all(&hosts)) {
+                    let status = match opened {
+                        Ok((_tunnel, runtime)) => {
+                            runtime.ping().await.unwrap_or_else(|e| e.to_string())
+                        }
+                        Err(e) => e,
                     };
                     println!("{:<16} {:<28} {}", host.id, host.ssh, status);
                 }
             }
             HostCommand::Rm { id } => {
-                store.remove_host(&id)?;
+                let note = remote::forget_host(&store, &id).await?;
                 println!("Removed host {id}.");
+                if let Some(note) = note {
+                    eprintln!("warning: {note}");
+                }
             }
         },
         Command::Discover => {
-            let report = reconcile_once(&store).await?;
+            let report = reconcile_scope(&store, true).await?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&report.discovered)?);
             } else if report.discovered.is_empty() {
@@ -403,18 +406,22 @@ async fn run(cli: Cli) -> Result<ExitCode> {
 }
 
 async fn reconcile_once(store: &Store) -> Result<Report> {
+    reconcile_scope(store, false).await
+}
+
+/// Reconciles, connecting to the remote hosts that have projects, or to every
+/// host when `all_hosts` is set (discovery needs to look at all of them).
+async fn reconcile_scope(store: &Store, all_hosts: bool) -> Result<Report> {
     let (runtime, reason) = connect().await;
 
-    // One SSH connection per remote host, open for the length of this pass.
-    let hosts = store.hosts()?;
-    let mut tunnels = Vec::new();
-    for host in &hosts {
-        let opened = remote::Tunnel::open(host).and_then(|tunnel| {
-            let runtime = tunnel.runtime()?;
-            Ok((tunnel, runtime))
-        });
-        tunnels.push((host.id.clone(), opened.map_err(|e| e.to_string())));
-    }
+    // One SSH connection per host, opened together and kept for this pass.
+    let projects = store.projects()?;
+    let hosts: Vec<Host> = store
+        .hosts()?
+        .into_iter()
+        .filter(|h| all_hosts || projects.iter().any(|p| p.host == h.id))
+        .collect();
+    let tunnels = remote::open_all(&hosts);
     let mut remotes = reconcile::RemoteRuntimes::new();
     for (id, opened) in &tunnels {
         remotes.insert(

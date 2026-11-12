@@ -162,6 +162,14 @@ impl Runtime for FakeRuntime {
         })
     }
 
+    async fn remove_edge(&self, container: &str, _volume: &str) -> Result<()> {
+        self.with(|s| {
+            s.containers.retain(|c| c.name != container);
+            s.files.retain(|(c, _), _| c != container);
+            Ok(())
+        })
+    }
+
     async fn read_file(&self, container: &str, path: &str) -> Result<Option<String>> {
         self.with(|s| {
             let name = find(s, container)?.name.clone();

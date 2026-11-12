@@ -31,6 +31,12 @@ pub fn draft_remote(host: &Host, folder: &str) -> Result<Project> {
             host.name
         )));
     }
+    if !remote::folder_exists(host, folder)? {
+        return Err(Error::Other(format!(
+            "{folder} is not a folder on {}",
+            host.name
+        )));
+    }
     let mut detected = devcontainer::Detected::default();
     for candidate in [".devcontainer/devcontainer.json", ".devcontainer.json"] {
         let config_path = format!("{folder}/{candidate}");
@@ -39,7 +45,13 @@ pub fn draft_remote(host: &Host, folder: &str) -> Result<Project> {
             break;
         }
     }
-    Ok(build_draft(&host.id, PathBuf::from(folder), detected))
+    let mut project = build_draft(&host.id, PathBuf::from(folder), detected);
+    // Zevo cannot follow a file on another machine yet, so the declaration
+    // seeds the routes once and they are then managed in Zevo. No env file
+    // is written there either.
+    project.declared = false;
+    project.env_file = None;
+    Ok(project)
 }
 
 fn build_draft(host: &str, path: PathBuf, detected: devcontainer::Detected) -> Project {
@@ -110,7 +122,9 @@ pub fn apply_address(project: &mut Project) {
 /// the updated project if anything changed (already saved), `None` otherwise.
 /// A folder that is not visible from here is left alone.
 pub fn sync_declared(store: &Store, project: &Project) -> Result<Option<Project>> {
-    if !project.declared || !project.path.is_dir() {
+    // Only this machine's folders can be re-read; a remote project's path
+    // must never be looked up on the local disk.
+    if !project.declared || project.host != LOCAL_HOST_ID || !project.path.is_dir() {
         return Ok(None);
     }
     let mut updated = project.clone();

@@ -226,13 +226,13 @@ impl Host {
         let ssh = ssh.trim();
         let plain = !ssh.is_empty()
             && !ssh.starts_with('-')
-            && ssh.bytes().all(|b| {
-                b.is_ascii_alphanumeric()
-                    || matches!(b, b'@' | b'.' | b'-' | b'_' | b':' | b'[' | b']')
-            });
+            && ssh
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'@' | b'.' | b'-' | b'_'));
         if !plain {
             return Err(Error::Other(format!(
-                "'{ssh}' is not a valid SSH destination (use user@address or a name from your SSH config)"
+                "'{ssh}' is not a valid SSH destination (use user@address or a name from your SSH \
+                 config; a non-standard port belongs in the SSH config)"
             )));
         }
         let machine = ssh.rsplit('@').next().unwrap_or(ssh);
@@ -326,6 +326,7 @@ mod tests {
         assert!(Host::from_ssh("-oProxyCommand=evil", None, None).is_err());
         assert!(Host::from_ssh("host; rm -rf /", None, None).is_err());
         assert!(Host::from_ssh("me@box", Some("local"), None).is_err());
+        assert!(Host::from_ssh("dev@box:2222", None, None).is_err());
     }
 
     #[test]

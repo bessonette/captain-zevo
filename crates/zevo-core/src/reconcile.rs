@@ -213,6 +213,8 @@ struct RemoteHost<'a> {
     host: Host,
     runtime: &'a dyn Runtime,
     containers: Vec<ContainerInfo>,
+    /// The edge Traefik is running there and can take route files.
+    edge_ready: bool,
 }
 
 /// Reconciles local projects and projects on the given remote hosts.
@@ -276,6 +278,7 @@ pub async fn reconcile_hosts(
         let needs_edge = projects
             .iter()
             .any(|p| p.host == host.id && p.routes.iter().any(|r| r.target == Target::Container));
+        let mut edge_ready = false;
         if needs_edge {
             let prepared = async {
                 rt.ensure_network(&settings.network).await?;
@@ -290,10 +293,14 @@ pub async fn reconcile_hosts(
             }
             .await;
             match prepared {
-                Ok(true) => report.actions.push(Action::StartedEdge {
-                    host: host.id.clone(),
-                }),
-                Ok(false) => {}
+                Ok(started) => {
+                    edge_ready = true;
+                    if started {
+                        report.actions.push(Action::StartedEdge {
+                            host: host.id.clone(),
+                        });
+                    }
+                }
                 Err(e) => report.warnings.push(format!("{}: {e}", host.name)),
             }
         }
@@ -310,6 +317,7 @@ pub async fn reconcile_hosts(
                         host: host.clone(),
                         runtime: rt,
                         containers,
+                        edge_ready,
                     },
                 );
             }
@@ -351,13 +359,20 @@ pub async fn reconcile_hosts(
                 &mut report,
             )
             .await;
-            // The edge Traefik on that host routes to the container.
+            // The edge Traefik on that host routes to the container. Projects
+            // that only use fixed addresses do not involve it, and a host
+            // whose edge failed to start was already reported once.
+            let uses_edge =
+                ctx.edge_ready && project.routes.iter().any(|r| r.target == Target::Container);
             let path = format!(
                 "{}/{}",
                 crate::runtime::EDGE_ROUTES_DIR,
                 traefik::file_name(&project.slug)
             );
             let written = async {
+                if !uses_edge {
+                    return Ok(false);
+                }
                 let wanted = traefik::render_edge(project, &settings, status.container.as_deref())?;
                 if ctx.runtime.read_file(EDGE_CONTAINER, &path).await? == Some(wanted.clone()) {
                     return Ok(false);
@@ -459,10 +474,7 @@ pub async fn reconcile_hosts(
             continue;
         };
         for file in files {
-            let Some(slug) = file
-                .strip_prefix("zevo-")
-                .and_then(|f| f.strip_suffix(".yml"))
-            else {
+            let Some(slug) = traefik::slug_from_name(&file) else {
                 continue;
             };
             if !projects

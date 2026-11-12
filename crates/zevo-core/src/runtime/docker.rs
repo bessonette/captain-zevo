@@ -309,6 +309,11 @@ impl Runtime for DockerRuntime {
                 format!("--providers.file.directory={}", super::EDGE_ROUTES_DIR),
                 "--providers.file.watch=true".to_string(),
                 "--entrypoints.web.address=:80".to_string(),
+                // Requests arrive from the front Traefik, which already set
+                // X-Forwarded-Proto and friends for the browser's HTTPS
+                // request. Keep them, or apps behind the edge would think
+                // they were reached over plain HTTP.
+                "--entrypoints.web.forwardedHeaders.insecure=true".to_string(),
             ]),
             labels: Some(HashMap::from([(
                 MANAGED_LABEL.to_string(),
@@ -352,6 +357,37 @@ impl Runtime for DockerRuntime {
             return Err(err(e));
         }
         Ok(true)
+    }
+
+    async fn remove_edge(&self, container: &str, volume: &str) -> Result<()> {
+        match self.docker.inspect_container(container, None).await {
+            Ok(existing) => {
+                let ours = existing
+                    .config
+                    .and_then(|c| c.labels)
+                    .is_some_and(|labels| labels.contains_key(MANAGED_LABEL));
+                if !ours {
+                    return Err(Error::Runtime(format!(
+                        "'{container}' there was not created by Zevo"
+                    )));
+                }
+                self.remove_forced(container).await?;
+            }
+            Err(e) if is_status(&e, 404) => {}
+            Err(e) => return Err(err(e)),
+        }
+        match self
+            .docker
+            .remove_volume(
+                volume,
+                None::<bollard::query_parameters::RemoveVolumeOptions>,
+            )
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(e) if is_status(&e, 404) => Ok(()),
+            Err(e) => Err(err(e)),
+        }
     }
 
     // The file operations run a shell in the container. Values are passed as
