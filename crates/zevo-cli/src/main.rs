@@ -105,11 +105,26 @@ enum Command {
         editor: Option<String>,
     },
     /// Show the plugins folder and what the plugins in it add.
-    Plugins,
+    Plugins {
+        /// Print what Zevo ships with, as a plugin manifest to copy from.
+        #[arg(long)]
+        builtin: bool,
+        #[command(subcommand)]
+        command: Option<PluginsCommand>,
+    },
     /// Any other command runs a program called `zevo-<command>`, from the
     /// PATH or the plugins `bin` folder, with the remaining arguments.
     #[command(external_subcommand)]
     External(Vec<String>),
+}
+
+#[derive(Subcommand)]
+enum PluginsCommand {
+    /// Write a commented starting point for a plugin into the plugins folder.
+    New {
+        /// Name of the plugin's folder: lowercase letters, digits and '-'.
+        name: String,
+    },
 }
 
 #[derive(Args)]
@@ -618,7 +633,16 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 return Ok(ExitCode::FAILURE);
             }
         }
-        Command::Plugins => cmd_plugins(&store, cli.json)?,
+        Command::Plugins {
+            command: Some(PluginsCommand::New { name }),
+            ..
+        } => {
+            let path = zevo_core::plugins::scaffold(store.dir(), &name)?;
+            println!("Created {}.", path.display());
+            println!("Uncomment the examples you want, then run `zevo plugins` to check it.");
+        }
+        Command::Plugins { builtin: true, .. } => print!("{}", zevo_core::plugins::BUILTIN),
+        Command::Plugins { .. } => cmd_plugins(&store, cli.json)?,
         Command::External(args) => return run_external(&store, &args),
     }
     Ok(ExitCode::SUCCESS)
@@ -630,7 +654,7 @@ fn cmd_plugins(store: &Store, json: bool) -> Result<()> {
     let dir = store.dir().join(PLUGINS_DIR);
     // Made on first use, so the path printed below is somewhere a manifest
     // can be dropped straight away. Not being able to is no reason to fail.
-    let _ = std::fs::create_dir_all(&dir);
+    let _ = zevo_core::plugins::ensure_dir(store.dir());
     let plugins = Plugins::load(store.dir());
     let builtin = Plugins::builtin();
     // Templates, extras and editors as id, name, description, and whether
@@ -1124,7 +1148,7 @@ mod tests {
         }
         assert!(matches!(
             Cli::try_parse_from(["zevo", "plugins"]).unwrap().command,
-            Command::Plugins
+            Command::Plugins { .. }
         ));
     }
 

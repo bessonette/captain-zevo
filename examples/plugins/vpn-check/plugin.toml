@@ -1,0 +1,10 @@
+# Adds a "vpn" line to `zevo doctor`: whether a host name that only resolves
+# on the company network resolves right now. Edit HOST at the top of
+# vpn-check.sh.
+
+[[check]]
+# The name shown in `zevo doctor`. A later plugin with the same name
+# replaces this check.
+name = "vpn"
+# "./" means next to this file. The script must be executable.
+command = ["./vpn-check.sh"]
