@@ -34,9 +34,10 @@ pub(super) struct AddForm {
     /// "Start a new project": its name, where to create it, and the starter.
     new_name: Entity<InputState>,
     new_parent: Entity<InputState>,
-    new_template: &'static str,
+    /// Id of the chosen template, from `Snapshot::templates`.
+    new_template: String,
     /// Ids of the extras that are ticked.
-    new_extras: Vec<&'static str>,
+    new_extras: Vec<String>,
     creating: bool,
     _folder_enter: Subscription,
 }
@@ -126,6 +127,15 @@ impl Shell {
                     })
             })
             .unwrap_or_else(|| "~".to_string());
+        // The form can be opened before the first snapshot has loaded; it
+        // then starts from what Zevo ships with, as it always did.
+        let (templates, extras) = match &self.snapshot {
+            Some(snapshot) => (snapshot.templates.clone(), snapshot.extras.clone()),
+            None => {
+                let builtin = zevo_core::plugins::Plugins::builtin();
+                (builtin.templates, builtin.extras)
+            }
+        };
         let folder = text_input("/path/to/project", "", window, cx);
         // Enter in the folder box continues, like the button.
         let _folder_enter = cx.subscribe_in(
@@ -148,11 +158,11 @@ impl Shell {
             busy: false,
             new_name: text_input("My app", "", window, cx),
             new_parent: text_input("/path/to/projects", &default_parent, window, cx),
-            new_template: zevo_core::templates::TEMPLATES[0].id,
-            new_extras: zevo_core::templates::EXTRAS
+            new_template: templates.first().map(|t| t.id.clone()).unwrap_or_default(),
+            new_extras: extras
                 .iter()
                 .filter(|e| e.default)
-                .map(|e| e.id)
+                .map(|e| e.id.clone())
                 .collect(),
             creating: false,
             _folder_enter,
@@ -228,7 +238,7 @@ impl Shell {
         let Some(form) = &mut self.add else { return };
         let name = form.new_name.read(cx).value().to_string();
         let parent = form.new_parent.read(cx).value().to_string();
-        let template = form.new_template;
+        let template = form.new_template.clone();
         let extras = form.new_extras.clone();
         form.creating = true;
         form.error = None;
@@ -236,7 +246,7 @@ impl Shell {
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    backend.create_project(&parent, &name, template, &extras)
+                    backend.create_project(&parent, &name, &template, &extras)
                 })
                 .await;
             _ = this.update_in(cx, |this, window, cx| {
@@ -393,16 +403,16 @@ impl Shell {
                         ),
                 )
                 .child(h_flex().gap_2().flex_wrap().children(
-                    zevo_core::templates::TEMPLATES.iter().enumerate().map(|(ix, template)| {
-                        let id = template.id;
+                    snapshot.templates.iter().enumerate().map(|(ix, template)| {
+                        let id = template.id.clone();
                         Button::new(("template", ix))
                             .small()
-                            .label(template.name)
-                            .tooltip(template.description)
+                            .label(template.name.clone())
+                            .tooltip(template.description.clone())
                             .when(form.new_template == id, |b| b.primary())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(form) = &mut this.add {
-                                    form.new_template = id;
+                                    form.new_template = id.clone();
                                 }
                                 cx.notify();
                             }))
@@ -413,17 +423,17 @@ impl Shell {
                         .gap_1p5()
                         .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Include"))
                         .child(h_flex().gap_x_4().gap_y_1p5().flex_wrap().children(
-                            zevo_core::templates::EXTRAS.iter().enumerate().map(|(ix, extra)| {
-                                let id = extra.id;
+                            snapshot.extras.iter().enumerate().map(|(ix, extra)| {
+                                let id = extra.id.clone();
                                 Checkbox::new(("extra", ix))
-                                    .label(extra.name)
-                                    .tooltip(extra.description)
+                                    .label(extra.name.clone())
+                                    .tooltip(extra.description.clone())
                                     .checked(form.new_extras.contains(&id))
                                     .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                                         if let Some(form) = &mut this.add {
                                             form.new_extras.retain(|e| *e != id);
                                             if *checked {
-                                                form.new_extras.push(id);
+                                                form.new_extras.push(id.clone());
                                             }
                                         }
                                         cx.notify();

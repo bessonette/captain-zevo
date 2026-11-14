@@ -1,5 +1,6 @@
-//! HTTPS certificates for project hostnames, issued by the machine's local
-//! certificate authority (mkcert) so browsers trust them.
+//! HTTPS certificates for project hostnames, issued by a certificate
+//! authority browsers on this machine trust: mkcert's local one, or whatever
+//! the user's certificate plugin uses.
 //!
 //! Certificates live in a `zevo-certs` folder inside Traefik's route
 //! directory: that directory is already mounted into Traefik, and Traefik
@@ -12,6 +13,7 @@ use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use crate::model::{Project, Settings, TraefikSettings};
+use crate::plugins::{IssuerPlugin, Plugins, run};
 use crate::{Error, Result};
 
 pub const CERT_DIR: &str = "zevo-certs";
@@ -19,11 +21,156 @@ pub const CERT_DIR: &str = "zevo-certs";
 /// mkcert certificates last a little over two years; renew well before.
 const RENEW_AFTER: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 
+/// How long a certificate plugin may take to say whether it is ready.
+const PLUGIN_READY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a certificate plugin may take to issue one certificate; an
+/// authority on another machine can be slow to answer.
+const PLUGIN_ISSUE_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Something that can issue locally trusted certificates.
 pub trait Issuer: Send + Sync {
     /// `Err` explains why certificates cannot be issued and how to fix it.
     fn ready(&self) -> std::result::Result<(), String>;
     fn issue(&self, names: &[String], cert: &Path, key: &Path) -> Result<()>;
+    /// Age at which a certificate from this issuer is replaced.
+    fn renew_after(&self) -> Duration {
+        RENEW_AFTER
+    }
+    /// Recorded next to each certificate, so that changing the issuer
+    /// replaces certificates the previous one made. `None` for mkcert, which
+    /// is what certificates recorded without one came from.
+    fn label(&self) -> Option<String> {
+        None
+    }
+}
+
+/// The issuer to use: the certificate plugin when one is configured, else
+/// mkcert. `config_dir` is Zevo's config directory, passed on to the plugin.
+pub fn issuer(plugins: &Plugins, config_dir: &Path) -> Box<dyn Issuer> {
+    match &plugins.issuer {
+        Some(plugin) => Box::new(PluginIssuer::new(plugin.clone(), config_dir)),
+        None => Box::new(Mkcert),
+    }
+}
+
+/// Issues certificates by running a certificate plugin's program. It gets
+/// `{"protocol":1,"request":"ready"}` or `{"protocol":1,"request":"issue",
+/// "names":[...],"cert":"<path>","key":"<path>"}` on its standard input, and
+/// answers `{"ok":true}` or `{"ok":false,"error":"..."}`. To issue, it writes
+/// the certificate (with any intermediates) and the key as PEM at the paths
+/// given.
+pub struct PluginIssuer {
+    plugin: IssuerPlugin,
+    config_dir: PathBuf,
+}
+
+/// What a certificate plugin answers.
+#[derive(serde::Deserialize)]
+struct PluginReply {
+    ok: bool,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+impl PluginIssuer {
+    pub fn new(plugin: IssuerPlugin, config_dir: &Path) -> Self {
+        Self {
+            plugin,
+            config_dir: config_dir.to_path_buf(),
+        }
+    }
+
+    /// Sends one request; `Err` is a sentence naming the plugin.
+    fn ask(
+        &self,
+        request: serde_json::Value,
+        timeout: Duration,
+    ) -> std::result::Result<(), String> {
+        let name = &self.plugin.name;
+        let out = run::run_blocking(&self.plugin.command, request, &self.config_dir, timeout)
+            .map_err(|e| format!("The certificate plugin '{name}' {e}"))?;
+        let reply: PluginReply = serde_json::from_str(out.trim()).map_err(|_| {
+            format!(
+                "The certificate plugin '{name}' gave an answer Zevo does not understand: '{}'",
+                run::quote(&out)
+            )
+        })?;
+        match reply {
+            PluginReply { ok: true, .. } => Ok(()),
+            PluginReply { error, .. } => Err(format!(
+                "The certificate plugin '{name}' says: {}",
+                error
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|e| !e.is_empty())
+                    .unwrap_or("it cannot")
+            )),
+        }
+    }
+}
+
+impl Issuer for PluginIssuer {
+    fn ready(&self) -> std::result::Result<(), String> {
+        self.ask(
+            serde_json::json!({"request": "ready"}),
+            PLUGIN_READY_TIMEOUT,
+        )
+    }
+
+    fn issue(&self, names: &[String], cert: &Path, key: &Path) -> Result<()> {
+        // The plugin writes beside the real files, which are then replaced
+        // only if it wrote both. Otherwise a plugin that answers "ok" without
+        // writing would have the certificate already there counted as new,
+        // and one that fails halfway would leave a certificate and key that
+        // do not belong together.
+        let beside = |path: &Path| {
+            let mut name = path.as_os_str().to_owned();
+            name.push(".new");
+            PathBuf::from(name)
+        };
+        let (new_cert, new_key) = (beside(cert), beside(key));
+        let discard = || {
+            let _ = std::fs::remove_file(&new_cert);
+            let _ = std::fs::remove_file(&new_key);
+        };
+        discard();
+        let request = serde_json::json!({
+            "request": "issue",
+            "names": names,
+            "cert": new_cert,
+            "key": new_key,
+        });
+        if let Err(e) = self.ask(request, PLUGIN_ISSUE_TIMEOUT) {
+            discard();
+            return Err(Error::Other(e));
+        }
+        if let Some(missing) = [&new_cert, &new_key].into_iter().find(|p| !p.is_file()) {
+            let message = format!(
+                "The certificate plugin '{}' said it issued a certificate but did not write {}",
+                self.plugin.name,
+                missing.display()
+            );
+            discard();
+            return Err(Error::Other(message));
+        }
+        for (new, real) in [(&new_key, key), (&new_cert, cert)] {
+            std::fs::rename(new, real)
+                .map_err(|e| Error::io(format!("replacing {}", real.display()), e))?;
+        }
+        Ok(())
+    }
+
+    fn label(&self) -> Option<String> {
+        Some(format!("plugin {}", self.plugin.name))
+    }
+
+    fn renew_after(&self) -> Duration {
+        match self.plugin.renew_after_hours {
+            Some(hours) => Duration::from_secs(hours.saturating_mul(60 * 60)),
+            None => RENEW_AFTER,
+        }
+    }
 }
 
 /// Issues certificates by running the `mkcert` command.
@@ -128,8 +275,9 @@ pub fn existing(slug: &str, traefik: &TraefikSettings) -> Option<(String, String
 }
 
 /// Whether the project already has a certificate that covers its current
-/// hostnames and is not due for renewal. Cheap: reads two small files.
-pub fn is_current(project: &Project, settings: &Settings) -> bool {
+/// hostnames and is not due for renewal by `issuer`. Cheap: reads two small
+/// files.
+pub fn is_current(project: &Project, settings: &Settings, issuer: &dyn Issuer) -> bool {
     let Some(traefik) = &settings.traefik else {
         return false;
     };
@@ -137,10 +285,12 @@ pub fn is_current(project: &Project, settings: &Settings) -> bool {
     let f = files(&project.slug, &traefik.dynamic_dir);
     !wanted.is_empty()
         && f.key.is_file()
-        && std::fs::read_to_string(&f.names).is_ok_and(|have| have == wanted.join("\n"))
+        && std::fs::read_to_string(&f.names).is_ok_and(|have| have == record(&wanted, issuer))
         && std::fs::metadata(&f.cert)
             .and_then(|m| m.modified())
-            .is_ok_and(|at| SystemTime::now().duration_since(at).unwrap_or_default() < RENEW_AFTER)
+            .is_ok_and(|at| {
+                SystemTime::now().duration_since(at).unwrap_or_default() < issuer.renew_after()
+            })
 }
 
 /// Makes sure the project has a current certificate for its hostnames.
@@ -154,7 +304,7 @@ pub fn ensure(project: &Project, settings: &Settings, issuer: &dyn Issuer) -> Re
         remove(&project.slug, &traefik.dynamic_dir)?;
         return Ok(false);
     }
-    if is_current(project, settings) {
+    if is_current(project, settings, issuer) {
         return Ok(false);
     }
     let f = files(&project.slug, &traefik.dynamic_dir);
@@ -162,9 +312,19 @@ pub fn ensure(project: &Project, settings: &Settings, issuer: &dyn Issuer) -> Re
     std::fs::create_dir_all(&dir)
         .map_err(|e| Error::io(format!("creating {}", dir.display()), e))?;
     issuer.issue(&wanted, &f.cert, &f.key)?;
-    std::fs::write(&f.names, wanted.join("\n"))
+    std::fs::write(&f.names, record(&wanted, issuer))
         .map_err(|e| Error::io(format!("writing {}", f.names.display()), e))?;
     Ok(true)
+}
+
+/// What the `.names` file next to a certificate holds: the names it covers,
+/// one per line, then the issuer if it is not mkcert.
+fn record(names: &[String], issuer: &dyn Issuer) -> String {
+    let mut text = names.join("\n");
+    if let Some(label) = issuer.label() {
+        text.push_str(&format!("\n# issued by {label}"));
+    }
+    text
 }
 
 /// Deletes a project's certificate files, if any.
@@ -305,5 +465,138 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn mkcert_is_used_unless_a_certificate_plugin_is_configured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut plugins = Plugins::default();
+        assert_eq!(issuer(&plugins, tmp.path()).label(), None);
+        plugins.issuer = Some(IssuerPlugin {
+            name: "step-ca".into(),
+            command: vec!["step-issue".into()],
+            renew_after_hours: Some(16),
+        });
+        let chosen = issuer(&plugins, tmp.path());
+        assert_eq!(chosen.label().as_deref(), Some("plugin step-ca"));
+        assert_eq!(chosen.renew_after(), Duration::from_secs(16 * 60 * 60));
+    }
+
+    #[cfg(unix)]
+    mod plugin {
+        use super::*;
+        use crate::plugins::run::testing::script;
+
+        /// A certificate plugin that keeps each request in `requests` and
+        /// writes placeholder PEM files where it is told to.
+        const ISSUE: &str = r#"
+read -r line
+printf '%s\n' "$line" >> "$(dirname "$0")/requests"
+case "$line" in
+  *'"request":"ready"'*) echo '{"ok":true}' ;;
+  *'"request":"issue"'*)
+    cert=$(printf '%s' "$line" | sed 's/.*"cert":"\([^"]*\)".*/\1/')
+    key=$(printf '%s' "$line" | sed 's/.*"key":"\([^"]*\)".*/\1/')
+    echo CERT > "$cert"; echo KEY > "$key"
+    echo '{"ok":true}' ;;
+  *) echo '{"ok":false,"error":"unknown request"}' ;;
+esac
+"#;
+
+        fn plugin_issuer(dir: &Path, body: &str) -> PluginIssuer {
+            PluginIssuer::new(
+                IssuerPlugin {
+                    name: "test-ca".into(),
+                    command: script(dir, "issue.sh", body),
+                    renew_after_hours: None,
+                },
+                dir,
+            )
+        }
+
+        #[test]
+        fn a_plugin_answers_ready_and_issues_where_it_is_told() {
+            let tmp = tempfile::tempdir().unwrap();
+            let issuer = plugin_issuer(tmp.path(), ISSUE);
+            assert_eq!(issuer.ready(), Ok(()));
+
+            let s = settings(tmp.path());
+            let p = project(&[(None, None)]);
+            assert!(ensure(&p, &s, &issuer).unwrap());
+            let f = files("shop", tmp.path());
+            assert_eq!(std::fs::read_to_string(&f.cert).unwrap(), "CERT\n");
+            assert_eq!(std::fs::read_to_string(&f.key).unwrap(), "KEY\n");
+            assert!(!ensure(&p, &s, &issuer).unwrap());
+
+            let requests: Vec<serde_json::Value> =
+                std::fs::read_to_string(tmp.path().join("requests"))
+                    .unwrap()
+                    .lines()
+                    .map(|l| serde_json::from_str(l).unwrap())
+                    .collect();
+            assert_eq!(
+                requests,
+                [
+                    serde_json::json!({"protocol": 1, "request": "ready"}),
+                    serde_json::json!({
+                        "protocol": 1,
+                        "request": "issue",
+                        "names": ["*.shop.localhost", "shop.localhost"],
+                        // Beside the real files, which Zevo then replaces.
+                        "cert": format!("{}.new", f.cert.display()),
+                        "key": format!("{}.new", f.key.display()),
+                    }),
+                ]
+            );
+        }
+
+        #[test]
+        fn switching_issuer_replaces_the_certificates_the_old_one_made() {
+            let tmp = tempfile::tempdir().unwrap();
+            let s = settings(tmp.path());
+            let p = project(&[(None, None)]);
+            assert!(ensure(&p, &s, &FakeIssuer::default()).unwrap());
+            let plugin = plugin_issuer(tmp.path(), ISSUE);
+            assert!(!is_current(&p, &s, &plugin));
+            assert!(ensure(&p, &s, &plugin).unwrap());
+            assert!(is_current(&p, &s, &plugin));
+            assert!(!is_current(&p, &s, &FakeIssuer::default()));
+        }
+
+        #[test]
+        fn a_plugin_that_refuses_or_misbehaves_explains_what_happened() {
+            let tmp = tempfile::tempdir().unwrap();
+            let refuses = plugin_issuer(
+                tmp.path(),
+                "echo '{\"ok\":false,\"error\":\"run step ca bootstrap first\"}'\n",
+            );
+            assert_eq!(
+                refuses.ready(),
+                Err("The certificate plugin 'test-ca' says: run step ca bootstrap first".into())
+            );
+
+            let garbage = plugin_issuer(tmp.path(), "echo hello\n");
+            assert_eq!(
+                garbage.ready(),
+                Err(
+                    "The certificate plugin 'test-ca' gave an answer Zevo does not understand: \
+                     'hello'"
+                        .into()
+                )
+            );
+
+            let crashes = plugin_issuer(tmp.path(), "echo 'token expired' >&2\nexit 2\n");
+            assert_eq!(
+                crashes.ready(),
+                Err("The certificate plugin 'test-ca' exited with status 2: token expired".into())
+            );
+
+            // Says yes but writes nothing.
+            let lies = plugin_issuer(tmp.path(), "echo '{\"ok\":true}'\n");
+            let err = ensure(&project(&[(None, None)]), &settings(tmp.path()), &lies)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("did not write"), "{err}");
+        }
     }
 }

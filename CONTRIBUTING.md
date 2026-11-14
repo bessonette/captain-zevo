@@ -12,6 +12,12 @@ Thanks for your interest. Issues and pull requests are welcome.
 
 New behaviour belongs in `zevo-core` so the CLI and the desktop app share it.
 
+Starter templates, extras and editors are data, not code: add or change them
+in `crates/zevo-core/src/builtin.toml`, which is read by the same loader as
+users' plugin manifests (`plugins.rs`). Programs a plugin names are run only
+through `plugins::run`, which enforces the timeout and turns every failure
+into a message.
+
 ## Ground rules
 
 - Code that talks to the container runtime goes through the `Runtime` trait.

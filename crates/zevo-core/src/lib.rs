@@ -10,6 +10,7 @@ pub mod health;
 pub mod ide;
 pub mod lifecycle;
 pub mod model;
+pub mod plugins;
 pub mod programs;
 pub mod reconcile;
 pub mod register;

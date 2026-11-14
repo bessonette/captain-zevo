@@ -21,9 +21,11 @@ pub struct Settings {
     /// `None` until `zevo setup` has run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traefik: Option<TraefikSettings>,
-    /// Editor that "Open in editor" uses; the first installed one if unset.
+    /// Id of the editor "Open in editor" uses (`vscode`, `zed`, or one a
+    /// plugin adds). Unset, or no longer installed: the first installed one,
+    /// see [`crate::ide::preferred`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub editor: Option<crate::ide::Editor>,
+    pub editor: Option<String>,
 }
 
 fn default_suffix() -> String {

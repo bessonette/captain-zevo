@@ -192,15 +192,14 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let backend = self.backend.clone();
+        let name = editor.name.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
-                .background_spawn(async move { backend.open_in_editor(&slug, editor) })
+                .background_spawn(async move { backend.open_in_editor(&slug, &editor) })
                 .await;
             _ = this.update_in(cx, |_, window, cx| match result {
-                Ok(()) => window.push_notification(format!("Opening in {}…", editor.name()), cx),
-                Err(e) => {
-                    window.push_notification(format!("Could not open {}: {e}", editor.name()), cx)
-                }
+                Ok(()) => window.push_notification(format!("Opening in {name}…"), cx),
+                Err(e) => window.push_notification(format!("Could not open {name}: {e}"), cx),
             });
         })
         .detach();
@@ -1028,16 +1027,16 @@ impl Shell {
                             .on_click(move |_, _, cx| cx.open_url(&url)),
                     )
                 })
-                .when_some(snapshot.editor(), |row, editor| {
+                .when_some(snapshot.editor().cloned(), |row, editor| {
                     let slug = p.slug.clone();
                     row.child(
                         Button::new("open-editor")
                             .primary()
                             .small()
                             .icon(IconName::SquareTerminal)
-                            .label(format!("Open in {}", editor.name()))
+                            .label(format!("Open in {}", editor.name))
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.open_editor(slug.clone(), editor, window, cx)
+                                this.open_editor(slug.clone(), editor.clone(), window, cx)
                             })),
                     )
                 }),
@@ -1517,19 +1516,20 @@ impl Shell {
                 .child(field(
                     "Editor",
                     if snapshot.editors.is_empty() {
-                        div().text_color(cx.theme().muted_foreground).child(
-                            "No supported editor found (VS Code, Cursor, Windsurf, VSCodium or Zed).",
-                        )
+                        div().text_color(cx.theme().muted_foreground).child(format!(
+                            "No supported editor found (looked for {}).",
+                            zevo_core::ide::list_names(&snapshot.known_editors)
+                        ))
                     } else {
-                        let current = snapshot.editor();
+                        let current = snapshot.editor().map(|e| e.id.clone());
                         h_flex().gap_2().children(snapshot.editors.iter().enumerate().map(|(ix, editor)| {
-                            let editor = *editor;
+                            let id = editor.id.clone();
                             Button::new(("editor", ix))
                                 .small()
-                                .label(editor.name())
-                                .when(current == Some(editor), |b| b.primary())
+                                .label(editor.name.clone())
+                                .when(current.as_ref() == Some(&id), |b| b.primary())
                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                    match this.backend.set_editor(editor) {
+                                    match this.backend.set_editor(&id) {
                                         Ok(()) => this.reload_now(cx),
                                         Err(e) => window.push_notification(format!("Could not save: {e}"), cx),
                                     }

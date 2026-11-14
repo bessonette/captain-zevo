@@ -4,159 +4,69 @@
 use std::path::{Path, PathBuf};
 
 use crate::model::{slugify, validate_slug};
+use crate::plugins::Plugins;
+pub use crate::plugins::{Extra, Template};
 use crate::{Error, Result};
 
-pub struct Template {
-    pub id: &'static str,
-    pub name: &'static str,
-    pub description: &'static str,
-    /// Devcontainer image.
-    image: &'static str,
-    /// Port the usual dev server for this stack listens on, if there is one.
-    port: Option<u16>,
-}
-
-/// Starters built on the maintained devcontainer base images.
-pub const TEMPLATES: [Template; 6] = [
-    Template {
-        id: "node",
-        name: "Node.js",
-        description: "JavaScript and TypeScript, dev server on port 3000",
-        image: "mcr.microsoft.com/devcontainers/javascript-node:22",
-        port: Some(3000),
-    },
-    Template {
-        id: "python",
-        name: "Python",
-        description: "Python 3, dev server on port 8000",
-        image: "mcr.microsoft.com/devcontainers/python:3",
-        port: Some(8000),
-    },
-    Template {
-        id: "rust",
-        name: "Rust",
-        description: "Rust toolchain, server on port 8080",
-        image: "mcr.microsoft.com/devcontainers/rust:1",
-        port: Some(8080),
-    },
-    Template {
-        id: "go",
-        name: "Go",
-        description: "Go toolchain, server on port 8080",
-        image: "mcr.microsoft.com/devcontainers/go:1",
-        port: Some(8080),
-    },
-    Template {
-        id: "php",
-        name: "PHP",
-        description: "PHP 8, dev server on port 8000",
-        image: "mcr.microsoft.com/devcontainers/php:8",
-        port: Some(8000),
-    },
-    Template {
-        id: "ubuntu",
-        name: "Ubuntu",
-        description: "A plain Ubuntu container; add a route when you have something to serve",
-        image: "mcr.microsoft.com/devcontainers/base:ubuntu",
-        port: None,
-    },
-];
-
-pub fn find(id: &str) -> Option<&'static Template> {
-    TEMPLATES.iter().find(|t| t.id == id)
-}
-
-/// An optional extra for a new project.
-pub struct Extra {
-    pub id: &'static str,
-    pub name: &'static str,
-    pub description: &'static str,
-    /// Ticked unless the user says otherwise.
-    pub default: bool,
-}
-
-pub const EXTRAS: [Extra; 6] = [
-    Extra {
-        id: "claude-code",
-        name: "Claude Code",
-        description: "Installs Claude Code and keeps its login and history across rebuilds",
-        default: false,
-    },
-    Extra {
-        id: "codex",
-        name: "Codex",
-        description: "Installs OpenAI's Codex CLI and keeps its login and history across rebuilds",
-        default: false,
-    },
-    Extra {
-        id: "docker",
-        name: "Docker access",
-        description: "Makes this machine's Docker available inside the container",
-        default: false,
-    },
-    Extra {
-        id: "github-cli",
-        name: "GitHub CLI",
-        description: "Installs gh",
-        default: false,
-    },
-    Extra {
-        id: "shell-history",
-        name: "Shell history",
-        description: "Keeps command history across rebuilds",
-        default: true,
-    },
-    Extra {
-        id: "address-file",
-        name: "Address file",
-        description: "Zevo writes the project's own hostnames to .devcontainer/zevo.env",
-        default: true,
-    },
-];
-
-/// Which extras a new project gets.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Which extras a new project gets, resolved against the loaded plugins.
+/// Kept in the plugins' order, whatever order they were asked for in, so the
+/// generated files do not depend on how the user typed the list.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Options {
-    pub claude_code: bool,
-    pub codex: bool,
-    pub docker: bool,
-    pub github_cli: bool,
-    pub shell_history: bool,
-    pub address_file: bool,
+    extras: Vec<Extra>,
 }
 
 impl Options {
     /// The extras that are on by default.
-    pub fn defaults() -> Options {
-        let ids: Vec<&str> = EXTRAS.iter().filter(|e| e.default).map(|e| e.id).collect();
-        Options::from_ids(&ids).expect("default extras are valid ids")
+    pub fn defaults(plugins: &Plugins) -> Options {
+        Options {
+            extras: plugins
+                .extras
+                .iter()
+                .filter(|e| e.default)
+                .cloned()
+                .collect(),
+        }
     }
 
-    pub fn from_ids<S: AsRef<str>>(ids: &[S]) -> Result<Options> {
-        let mut options = Options::default();
-        for id in ids {
-            match id.as_ref() {
-                "claude-code" => options.claude_code = true,
-                "codex" => options.codex = true,
-                "docker" => options.docker = true,
-                "github-cli" => options.github_cli = true,
-                "shell-history" => options.shell_history = true,
-                "address-file" => options.address_file = true,
-                other => {
-                    let known: Vec<&str> = EXTRAS.iter().map(|e| e.id).collect();
-                    return Err(Error::Other(format!(
-                        "there is no extra called '{other}' (choose from {})",
-                        known.join(", ")
-                    )));
-                }
-            }
+    /// The extras with these ids. An unknown id is an error that lists the
+    /// ones there are.
+    pub fn from_ids<S: AsRef<str>>(plugins: &Plugins, ids: &[S]) -> Result<Options> {
+        if let Some(unknown) = ids
+            .iter()
+            .map(AsRef::as_ref)
+            .find(|id| plugins.extra(id).is_none())
+        {
+            let known: Vec<&str> = plugins.extras.iter().map(|e| e.id.as_str()).collect();
+            return Err(Error::Other(format!(
+                "there is no extra called '{unknown}' (choose from {})",
+                known.join(", ")
+            )));
         }
-        Ok(options)
+        Ok(Options {
+            extras: plugins
+                .extras
+                .iter()
+                .filter(|e| ids.iter().any(|id| id.as_ref() == e.id))
+                .cloned()
+                .collect(),
+        })
+    }
+
+    /// The chosen extras, in the plugins' order.
+    pub fn extras(&self) -> &[Extra] {
+        &self.extras
     }
 
     /// Whether anything is kept in the project's state folder.
     fn persists_state(&self) -> bool {
-        self.claude_code || self.codex || self.shell_history
+        self.extras
+            .iter()
+            .any(|e| e.state || !e.persist_dirs.is_empty() || !e.persist_files.is_empty())
+    }
+
+    fn address_file(&self) -> bool {
+        self.extras.iter().any(|e| e.address_file)
     }
 }
 
@@ -165,6 +75,8 @@ impl Options {
 const STATE_DIR: &str = ".devcontainer/home";
 const PERSIST_SCRIPT: &str = ".devcontainer/persist-home.sh";
 const ADDRESS_FILE: &str = ".devcontainer/zevo.env";
+/// Added for extras that need Node.js when the template's image lacks it.
+const NODE_FEATURE: &str = "ghcr.io/devcontainers/features/node:1";
 
 /// The devcontainer.json for a new project.
 pub fn render(template: &Template, name: &str, slug: &str, options: &Options) -> String {
@@ -176,47 +88,37 @@ pub fn render(template: &Template, name: &str, slug: &str, options: &Options) ->
         config["forwardPorts"] = json!([port]);
         zevo["routes"] = json!([{ "port": port }]);
     }
-    if options.address_file {
+    if options.address_file() {
         zevo["envFile"] = json!(ADDRESS_FILE);
     }
 
     let mut features = serde_json::Map::new();
-    if options.claude_code {
-        features.insert(
-            "ghcr.io/anthropics/devcontainer-features/claude-code:1.0".into(),
-            json!({}),
-        );
-    }
-    // Claude Code's feature and the Codex CLI both need Node.js.
-    if (options.claude_code || options.codex) && template.id != "node" {
-        features.insert("ghcr.io/devcontainers/features/node:1".into(), json!({}));
-    }
-    if options.docker {
-        // The CLI from Docker's own packages: the Moby ones are not
-        // available on every base image.
-        features.insert(
-            "ghcr.io/devcontainers/features/docker-outside-of-docker:1".into(),
-            json!({ "moby": false }),
-        );
-    }
-    if options.github_cli {
-        features.insert(
-            "ghcr.io/devcontainers/features/github-cli:1".into(),
-            json!({}),
-        );
+    let mut post_create = Vec::new();
+    let mut container_env = serde_json::Map::new();
+    for extra in options.extras() {
+        for (reference, settings) in &extra.features {
+            features.insert(reference.clone(), settings.clone());
+        }
+        if extra.needs_node && !template.has_node {
+            // Not over options an extra chose for it.
+            features.entry(NODE_FEATURE).or_insert_with(|| json!({}));
+        }
+        post_create.extend(extra.post_create.as_deref());
+        for (key, value) in &extra.container_env {
+            container_env.insert(key.clone(), json!(value.replace("{state_dir}", STATE_DIR)));
+        }
     }
     if !features.is_empty() {
         config["features"] = serde_json::Value::Object(features);
     }
-
-    if options.codex {
-        config["postCreateCommand"] = json!("npm install -g @openai/codex");
+    if !post_create.is_empty() {
+        config["postCreateCommand"] = json!(post_create.join(" && "));
     }
     if options.persists_state() {
         config["postStartCommand"] = json!(format!("sh {PERSIST_SCRIPT}"));
     }
-    if options.shell_history {
-        config["containerEnv"] = json!({ "HISTFILE": format!("${{containerWorkspaceFolder}}/{STATE_DIR}/shell_history") });
+    if !container_env.is_empty() {
+        config["containerEnv"] = serde_json::Value::Object(container_env);
     }
 
     config["customizations"] = json!({ "zevo": zevo });
@@ -269,20 +171,35 @@ keep_file() {
 
 "#,
     );
-    if options.claude_code {
-        script.push_str("link_dir claude\nkeep_file .claude.json\n");
-    }
-    if options.codex {
-        script.push_str("link_dir codex\n");
+    // Plugin manifests are checked to only name plain files and folders
+    // here (see `plugins::validate`), so these lines cannot run anything.
+    for extra in options.extras() {
+        for dir in &extra.persist_dirs {
+            script.push_str(&format!("link_dir {dir}\n"));
+        }
+        for file in &extra.persist_files {
+            script.push_str(&format!("keep_file {file}\n"));
+        }
     }
     script
 }
 
 /// Creates `parent/<slug>` with a devcontainer.json from the template and
 /// returns the new folder. Refuses to touch a folder that already exists.
-pub fn create(parent: &Path, name: &str, template_id: &str, options: &Options) -> Result<PathBuf> {
-    let template = find(template_id)
-        .ok_or_else(|| Error::Other(format!("there is no template called '{template_id}'")))?;
+pub fn create(
+    plugins: &Plugins,
+    parent: &Path,
+    name: &str,
+    template_id: &str,
+    options: &Options,
+) -> Result<PathBuf> {
+    let template = plugins.template(template_id).ok_or_else(|| {
+        let known: Vec<&str> = plugins.templates.iter().map(|t| t.id.as_str()).collect();
+        Error::Other(format!(
+            "there is no template called '{template_id}' (choose from {})",
+            known.join(", ")
+        ))
+    })?;
     let name = name.trim();
     let slug = slugify(name);
     validate_slug(&slug)
@@ -318,7 +235,7 @@ pub fn create(parent: &Path, name: &str, template_id: &str, options: &Options) -
             "# Tool logins and history, kept across container rebuilds\n/{STATE_DIR}/"
         ));
     }
-    if options.address_file {
+    if options.address_file() {
         ignored.push(format!(
             "# This checkout's addresses, written by Captain Zevo\n/{ADDRESS_FILE}"
         ));
@@ -335,12 +252,24 @@ mod tests {
     use crate::devcontainer;
     use crate::model::DevcontainerKind;
 
+    fn builtin() -> Plugins {
+        Plugins::builtin()
+    }
+
     #[test]
     fn every_template_produces_a_config_zevo_can_read_back() {
         let tmp = tempfile::tempdir().unwrap();
-        for template in &TEMPLATES {
+        let plugins = builtin();
+        for template in &plugins.templates {
             let name = format!("My \"{}\" App", template.name);
-            let folder = create(tmp.path(), &name, template.id, &Options::defaults()).unwrap();
+            let folder = create(
+                &plugins,
+                tmp.path(),
+                &name,
+                &template.id,
+                &Options::defaults(&plugins),
+            )
+            .unwrap();
             let detected = devcontainer::detect(&folder).unwrap();
             assert_eq!(detected.kind, DevcontainerKind::Image, "{}", template.id);
             let declared = detected.declared.unwrap();
@@ -362,12 +291,14 @@ mod tests {
     #[test]
     fn extras_add_features_persistence_and_ignore_rules() {
         let tmp = tempfile::tempdir().unwrap();
-        let all: Vec<&str> = EXTRAS.iter().map(|e| e.id).collect();
+        let plugins = builtin();
+        let all: Vec<&str> = plugins.extras.iter().map(|e| e.id.as_str()).collect();
         let folder = create(
+            &plugins,
             tmp.path(),
             "Shop",
             "python",
-            &Options::from_ids(&all).unwrap(),
+            &Options::from_ids(&plugins, &all).unwrap(),
         )
         .unwrap();
         let config: serde_json::Value = serde_json::from_str(
@@ -404,7 +335,7 @@ mod tests {
         );
 
         // With nothing chosen, none of it is written.
-        let bare = create(tmp.path(), "Bare", "node", &Options::default()).unwrap();
+        let bare = create(&plugins, tmp.path(), "Bare", "node", &Options::default()).unwrap();
         let config = std::fs::read_to_string(bare.join(".devcontainer/devcontainer.json")).unwrap();
         assert!(
             !config.contains("features")
@@ -415,14 +346,20 @@ mod tests {
         assert!(!bare.join(".gitignore").exists());
         // Node templates do not add the Node.js feature twice.
         let node = render(
-            find("node").unwrap(),
+            plugins.template("node").unwrap(),
             "n",
             "n",
-            &Options::from_ids(&["codex"]).unwrap(),
+            &Options::from_ids(&plugins, &["codex"]).unwrap(),
         );
         assert!(!node.contains("features/node"), "{node}");
 
-        assert!(Options::from_ids(&["telepathy"]).is_err());
+        let unknown = Options::from_ids(&plugins, &["telepathy"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            unknown.contains("'telepathy'") && unknown.contains("claude-code, codex, docker"),
+            "{unknown}"
+        );
     }
 
     #[cfg(unix)]
@@ -430,8 +367,9 @@ mod tests {
     fn the_persist_script_links_state_and_survives_a_rebuild() {
         use std::process::Command;
         let tmp = tempfile::tempdir().unwrap();
-        let options = Options::from_ids(&["claude-code", "codex"]).unwrap();
-        let folder = create(tmp.path(), "Shop", "node", &options).unwrap();
+        let plugins = builtin();
+        let options = Options::from_ids(&plugins, &["claude-code", "codex"]).unwrap();
+        let folder = create(&plugins, tmp.path(), "Shop", "node", &options).unwrap();
         let script = folder.join(".devcontainer/persist-home.sh");
         let run = |home: &Path| {
             let status = Command::new("sh")
@@ -473,19 +411,116 @@ mod tests {
     #[test]
     fn refuses_bad_names_unknown_templates_and_existing_folders() {
         let tmp = tempfile::tempdir().unwrap();
+        let plugins = builtin();
         let none = Options::default();
-        assert!(create(tmp.path(), "!!!", "node", &none).is_err());
-        assert!(create(tmp.path(), "shop", "cobol", &none).is_err());
-        assert!(create(&tmp.path().join("missing"), "shop", "node", &none).is_err());
+        assert!(create(&plugins, tmp.path(), "!!!", "node", &none).is_err());
+        let unknown = create(&plugins, tmp.path(), "shop", "cobol", &none)
+            .unwrap_err()
+            .to_string();
+        assert!(unknown.contains("node, python"), "{unknown}");
+        assert!(create(&plugins, &tmp.path().join("missing"), "shop", "node", &none).is_err());
 
-        let folder = create(tmp.path(), "Shop", "node", &none).unwrap();
+        let folder = create(&plugins, tmp.path(), "Shop", "node", &none).unwrap();
         assert_eq!(folder, tmp.path().join("shop"));
         std::fs::write(folder.join("keep.txt"), "mine").unwrap();
         // A second attempt leaves the existing folder exactly as it is.
-        assert!(create(tmp.path(), "shop", "python", &none).is_err());
+        assert!(create(&plugins, tmp.path(), "shop", "python", &none).is_err());
         assert_eq!(
             std::fs::read_to_string(folder.join("keep.txt")).unwrap(),
             "mine"
         );
+    }
+
+    #[test]
+    fn templates_and_extras_from_a_manifest_shape_the_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = tmp
+            .path()
+            .join(crate::plugins::PLUGINS_DIR)
+            .join("elixir.toml");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(
+            &manifest,
+            r#"
+            [[template]]
+            id = "elixir"
+            name = "Elixir"
+            image = "mcr.microsoft.com/devcontainers/base:debian"
+            port = 4000
+
+            [[extra]]
+            id = "hex"
+            name = "Hex"
+            needs_node = true
+            post_create = "mix local.hex --force"
+            persist_dirs = ["hex"]
+            [extra.features]
+            "ghcr.io/example/features/elixir:1" = { version = "1.17" }
+            "#,
+        )
+        .unwrap();
+        let plugins = Plugins::load(tmp.path());
+        assert_eq!(plugins.problems, Vec::<String>::new());
+
+        let options = Options::from_ids(&plugins, &["hex", "codex"]).unwrap();
+        let folder = create(&plugins, tmp.path(), "Phoenix", "elixir", &options).unwrap();
+        let config: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(folder.join(".devcontainer/devcontainer.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            config["image"],
+            "mcr.microsoft.com/devcontainers/base:debian"
+        );
+        assert_eq!(config["customizations"]["zevo"]["routes"][0]["port"], 4000);
+        assert_eq!(
+            config["features"]["ghcr.io/example/features/elixir:1"]["version"],
+            "1.17"
+        );
+        assert!(config["features"]["ghcr.io/devcontainers/features/node:1"].is_object());
+        // Built-ins come first, then the manifest's, whatever order was asked.
+        assert_eq!(
+            config["postCreateCommand"],
+            "npm install -g @openai/codex && mix local.hex --force"
+        );
+        assert_eq!(
+            config["postStartCommand"],
+            "sh .devcontainer/persist-home.sh"
+        );
+        let script = std::fs::read_to_string(folder.join(".devcontainer/persist-home.sh")).unwrap();
+        assert!(
+            script.ends_with("link_dir codex\nlink_dir hex\n"),
+            "{script}"
+        );
+        let ignore = std::fs::read_to_string(folder.join(".gitignore")).unwrap();
+        assert!(ignore.contains("/.devcontainer/home/"), "{ignore}");
+    }
+
+    #[test]
+    fn a_manifest_cannot_put_shell_into_the_persist_script() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().join(crate::plugins::PLUGINS_DIR);
+        std::fs::create_dir_all(&folder).unwrap();
+        for (file, keeps) in [
+            ("a.toml", r#"persist_dirs = ["x; rm -rf ~"]"#),
+            ("b.toml", r#"persist_files = ["$(touch pwned)"]"#),
+            ("c.toml", r#"persist_dirs = ["../outside"]"#),
+            ("d.toml", r#"persist_files = [".."]"#),
+        ] {
+            std::fs::write(
+                folder.join(file),
+                format!("[[extra]]\nid = \"bad\"\nname = \"Bad\"\n{keeps}\n"),
+            )
+            .unwrap();
+        }
+        let plugins = Plugins::load(tmp.path());
+        assert_eq!(plugins.problems.len(), 4, "{:?}", plugins.problems);
+        assert!(
+            plugins
+                .problems
+                .iter()
+                .all(|p| p.contains("plain file or folder name"))
+        );
+        assert!(plugins.extra("bad").is_none());
     }
 }

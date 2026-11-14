@@ -2,11 +2,13 @@
 //! directory and project containers attached to the shared network.
 
 use std::path::Path;
+use std::time::Duration;
 
 use serde::Serialize;
 
 use crate::health::{self, Listening};
 use crate::model::{Host, LOCAL_HOST_ID, Project, Settings, Target};
+use crate::plugins::{self, Plugins};
 use crate::runtime::{ContainerInfo, Runtime};
 use crate::store::Store;
 use crate::{Error, Result, certs, envfile, register, setup, traefik};
@@ -201,7 +203,8 @@ fn normalize(path: &Path) -> String {
 /// Runs one reconciliation pass. Route files are written even when the
 /// runtime is unavailable; runtime problems are reported as warnings.
 pub async fn reconcile(store: &Store, runtime: Option<&dyn Runtime>) -> Result<Report> {
-    reconcile_with(store, runtime, &certs::Mkcert).await
+    let issuer = certs::issuer(&Plugins::load(store.dir()), store.dir());
+    reconcile_with(store, runtime, issuer.as_ref()).await
 }
 
 /// [`reconcile`] with a chosen certificate issuer.
@@ -236,8 +239,75 @@ struct RemoteHost<'a> {
     edge_ready: bool,
 }
 
-/// Reconciles local projects and projects on the given remote hosts.
+/// How long a hook may run. Hooks run side by side and the pass waits for
+/// them, so this bounds what they add to a pass; the app and `--watch`
+/// reconcile every few seconds, and a hook that needs longer should start
+/// its work in the background and return.
+const HOOK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Reconciles local projects and projects on the given remote hosts, then
+/// runs the plugin hooks for what the pass changed. Problems with plugin
+/// manifests are added to the warnings on every pass.
 pub async fn reconcile_hosts(
+    store: &Store,
+    runtime: Option<&dyn Runtime>,
+    remotes: &RemoteRuntimes<'_>,
+    issuer: &dyn certs::Issuer,
+) -> Result<Report> {
+    // Without plugins this costs one directory read.
+    let plugins = Plugins::load(store.dir());
+    let mut report = reconcile_pass(store, runtime, remotes, issuer).await?;
+    run_hooks(&plugins, store.dir(), &mut report, HOOK_TIMEOUT).await;
+    report.warnings.extend(plugins.problems.iter().cloned());
+    Ok(report)
+}
+
+/// The `snake_case` name of an action, as hooks filter on it.
+fn action_tag(action: &Action) -> String {
+    serde_json::to_value(action)
+        .ok()
+        .and_then(|v| v.get("action")?.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// Runs, side by side, every hook that wants one of the pass's actions,
+/// with `{"protocol":1,"event":"reconcile","actions":[...],"projects":[...]}`
+/// on its standard input. A pass that changed nothing runs none. Failures
+/// become warnings.
+async fn run_hooks(plugins: &Plugins, config_dir: &Path, report: &mut Report, timeout: Duration) {
+    if report.actions.is_empty() || plugins.hooks.is_empty() {
+        return;
+    }
+    let tags: Vec<String> = report.actions.iter().map(action_tag).collect();
+    let request = serde_json::json!({
+        "event": "reconcile",
+        "actions": report.actions,
+        "projects": report.projects,
+    });
+    let runs = plugins
+        .hooks
+        .iter()
+        .filter(|hook| hook.actions.is_empty() || hook.actions.iter().any(|a| tags.contains(a)))
+        .map(|hook| {
+            let request = request.clone();
+            async move {
+                plugins::run::run(&hook.command, request, config_dir, timeout)
+                    .await
+                    .err()
+                    .map(|e| {
+                        format!(
+                            "The plugin hook '{}' {e}",
+                            plugins::run::program_name(&hook.command)
+                        )
+                    })
+            }
+        });
+    let failures = futures_util::future::join_all(runs).await;
+    report.warnings.extend(failures.into_iter().flatten());
+}
+
+/// One pass, without the plugin hooks.
+async fn reconcile_pass(
     store: &Store,
     runtime: Option<&dyn Runtime>,
     remotes: &RemoteRuntimes<'_>,
@@ -423,7 +493,7 @@ pub async fn reconcile_hosts(
         // HTTPS entrypoints need a certificate browsers trust for these names.
         if traefik_settings.tls
             && !project.routes.is_empty()
-            && !certs::is_current(project, &settings)
+            && !certs::is_current(project, &settings, issuer)
         {
             // Settings saved before Zevo recorded where a containerised Traefik
             // reads its files cannot produce a path Traefik can open.
@@ -1173,5 +1243,133 @@ mod tests {
         let mut p = project("shop", "/work/shop");
         p.routes[0].path_prefix = Some("/admin".into());
         assert_eq!(urls(&p, &settings), ["http://shop.localhost:8080/admin"]);
+    }
+
+    /// Writes a manifest with the given hooks into the store's plugins folder.
+    #[cfg(unix)]
+    fn install_hooks(store: &Store, hooks: &[(&str, &str, &[&str])]) {
+        let dir = store.dir().join(plugins::PLUGINS_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut manifest = String::new();
+        for (name, body, actions) in hooks {
+            let script = dir.join(format!("{name}.sh"));
+            std::fs::write(&script, body).unwrap();
+            manifest.push_str(&format!(
+                "[[hook]]\ncommand = [\"/bin/sh\", {:?}]\nactions = {:?}\n",
+                script, actions
+            ));
+        }
+        std::fs::write(dir.join("hooks.toml"), manifest).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hooks_get_the_pass_as_json_when_it_has_an_action_they_want() {
+        let (_tmp, store, rt) = set_up().await;
+        store.add_project(&project("shop", "/work/shop")).unwrap();
+        rt.add_container(devcontainer("vsc-shop", "/work/shop"));
+        // Each hook appends what it was sent to `<its script>.json`.
+        let record = "cat >> \"$0.json\"\n";
+        let other = store.dir().join("certificates");
+        install_hooks(
+            &store,
+            &[
+                ("any", record, &[]),
+                ("routes", record, &["wrote_routes"]),
+                (
+                    "certs",
+                    &format!("touch {other:?}\n"),
+                    &["issued_certificate"],
+                ),
+            ],
+        );
+        let sent_to = |hook: &str| -> Vec<serde_json::Value> {
+            let file = store
+                .dir()
+                .join(plugins::PLUGINS_DIR)
+                .join(format!("{hook}.sh.json"));
+            std::fs::read_to_string(file)
+                .unwrap()
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect()
+        };
+
+        let report = reconcile(&store, Some(&rt)).await.unwrap();
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let sent = [sent_to("any"), sent_to("routes")].concat();
+        assert_eq!(sent.len(), 2, "both matching hooks ran once");
+        assert_eq!(sent[0], sent[1]);
+        assert_eq!(sent[0]["protocol"], plugins::PROTOCOL);
+        assert_eq!(sent[0]["event"], "reconcile");
+        assert_eq!(
+            sent[0]["actions"],
+            serde_json::to_value(&report.actions).unwrap()
+        );
+        assert_eq!(sent[0]["actions"][1]["action"], "wrote_routes");
+        assert_eq!(sent[0]["projects"][0]["slug"], "shop");
+        assert_eq!(sent[0]["projects"][0]["state"], "running");
+        assert!(!other.exists(), "no certificate was issued");
+
+        // A pass that changes nothing runs no hooks.
+        let again = reconcile(&store, Some(&rt)).await.unwrap();
+        assert!(again.actions.is_empty());
+        assert_eq!(sent_to("any").len() + sent_to("routes").len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hook_that_fails_or_hangs_is_a_warning() {
+        let (_tmp, store, rt) = set_up().await;
+        store.add_project(&project("shop", "/work/shop")).unwrap();
+        install_hooks(
+            &store,
+            &[
+                ("fails", "echo 'cannot reach slack' >&2\nexit 4\n", &[]),
+                ("hangs", "exec sleep 30\n", &[]),
+            ],
+        );
+        let plugins = Plugins::load(store.dir());
+        let mut report = reconcile_pass(
+            &store,
+            Some(&rt),
+            &RemoteRuntimes::new(),
+            &certs::FakeIssuer::default(),
+        )
+        .await
+        .unwrap();
+        assert!(!report.actions.is_empty());
+        let started = std::time::Instant::now();
+        run_hooks(
+            &plugins,
+            store.dir(),
+            &mut report,
+            Duration::from_millis(500),
+        )
+        .await;
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the hooks ran side by side"
+        );
+        assert_eq!(
+            report.warnings,
+            [
+                "The plugin hook 'sh fails.sh' exited with status 4: cannot reach slack",
+                "The plugin hook 'sh hangs.sh' did not finish within 500 ms and was stopped",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn broken_plugin_manifests_are_reported_on_every_pass() {
+        let (_tmp, store, rt) = set_up().await;
+        let dir = store.dir().join(plugins::PLUGINS_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("broken.toml"), "[[hook]]\nprogram = \"x\"\n").unwrap();
+        for _ in 0..2 {
+            let report = reconcile(&store, Some(&rt)).await.unwrap();
+            assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+            assert!(report.warnings[0].contains("broken.toml"));
+        }
     }
 }

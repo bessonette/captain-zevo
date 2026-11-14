@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
-use zevo_core::certs::{self, Issuer as _};
-use zevo_core::ide::{self, Editor};
+use zevo_core::certs;
+use zevo_core::ide;
 use zevo_core::model::{Host, HostDetails, LOCAL_HOST_ID, Route, Target};
 use zevo_core::reconcile::{self, Action, ContainerState, Report};
 use zevo_core::runtime::{DockerRuntime, Runtime};
@@ -38,16 +38,16 @@ enum Command {
     New {
         /// Project name; the folder is named after it.
         name: String,
-        /// node, python, rust, go, php or ubuntu.
+        /// Starter template id (see `zevo plugins`; plugins can add more).
         #[arg(long, default_value = "node")]
         template: String,
         /// Folder to create the project in (default: the current folder).
         #[arg(long)]
         dir: Option<PathBuf>,
-        /// Add an extra: claude-code, codex, docker, github-cli. Repeatable.
+        /// Add an extra, by id (see `zevo plugins`). Repeatable.
         #[arg(long = "with", value_name = "EXTRA")]
         with: Vec<String>,
-        /// Leave out an extra that is on by default: shell-history, address-file.
+        /// Leave out an extra that is on by default. Repeatable.
         #[arg(long = "without", value_name = "EXTRA")]
         without: Vec<String>,
     },
@@ -99,11 +99,17 @@ enum Command {
     /// Open a project in an editor, attached to its devcontainer.
     Open {
         slug: String,
-        /// vscode, cursor, windsurf, vscodium or zed (default: your setting,
-        /// else the first one installed).
+        /// Editor id: vscode, cursor, windsurf, vscodium, zed, or one a
+        /// plugin adds (default: your setting, else the first one installed).
         #[arg(long)]
         editor: Option<String>,
     },
+    /// Show the plugins folder and what the plugins in it add.
+    Plugins,
+    /// Any other command runs a program called `zevo-<command>`, from the
+    /// PATH or the plugins `bin` folder, with the remaining arguments.
+    #[command(external_subcommand)]
+    External(Vec<String>),
 }
 
 #[derive(Args)]
@@ -332,17 +338,18 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 Some(dir) => dir,
                 None => std::env::current_dir().context("cannot tell the current folder")?,
             };
+            let plugins = zevo_core::plugins::Plugins::load(store.dir());
             // Validate both lists, then: defaults, plus --with, minus --without.
-            templates::Options::from_ids(&without)?;
-            let mut chosen: Vec<String> = templates::EXTRAS
+            templates::Options::from_ids(&plugins, &without)?;
+            let mut chosen: Vec<String> = templates::Options::defaults(&plugins)
+                .extras()
                 .iter()
-                .filter(|e| e.default)
-                .map(|e| e.id.to_string())
+                .map(|e| e.id.clone())
                 .chain(with)
                 .collect();
             chosen.retain(|id| !without.contains(id));
-            let options = templates::Options::from_ids(&chosen)?;
-            let folder = templates::create(&parent, &name, &template, &options)?;
+            let options = templates::Options::from_ids(&plugins, &chosen)?;
+            let folder = templates::create(&plugins, &parent, &name, &template, &options)?;
             let project = register::draft(&folder)?;
             register::add(&store, &project)?;
             let report = reconcile_once(&store).await?;
@@ -563,31 +570,34 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         }
         Command::Open { slug, editor } => {
             let project = store.project(&slug)?;
+            let known = zevo_core::plugins::Plugins::load(store.dir()).editors;
             let editor = match editor {
-                Some(name) => serde_json::from_value::<Editor>(serde_json::Value::String(
-                    name.to_lowercase(),
-                ))
-                .map_err(|_| {
-                    anyhow!(
-                        "unknown editor '{name}' (use vscode, cursor, windsurf, vscodium or zed)"
-                    )
-                })?,
-                None => store
-                    .settings()?
-                    .editor
-                    .or_else(|| ide::available().into_iter().next())
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "no supported editor found (VS Code, Cursor, Windsurf, VSCodium or Zed)"
-                        )
-                    })?,
+                Some(name) => {
+                    let id = name.to_lowercase();
+                    known.iter().find(|e| e.id == id).cloned().ok_or_else(|| {
+                        let ids: Vec<&str> = known.iter().map(|e| e.id.as_str()).collect();
+                        anyhow!("unknown editor '{name}' (use {})", ids.join(", "))
+                    })?
+                }
+                None => {
+                    let chosen = store.settings()?.editor;
+                    let installed = ide::available(&known);
+                    ide::preferred(chosen.as_deref(), &installed)
+                        .cloned()
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "no supported editor found (looked for {})",
+                                ide::list_names(&known)
+                            )
+                        })?
+                }
             };
             let host = match project.host.as_str() {
                 LOCAL_HOST_ID => None,
                 id => Some(store.host(id)?),
             };
-            ide::open(editor, &project, host.as_ref())?;
-            println!("Opening {} in {}.", project.slug, editor.name());
+            ide::open(&editor, &project, host.as_ref())?;
+            println!("Opening {} in {}.", project.slug, editor.name);
         }
         Command::Doctor => {
             let (runtime, _) = connect().await;
@@ -608,8 +618,205 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 return Ok(ExitCode::FAILURE);
             }
         }
+        Command::Plugins => cmd_plugins(&store, cli.json)?,
+        Command::External(args) => return run_external(&store, &args),
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// `zevo plugins`: where plugins go and what they add.
+fn cmd_plugins(store: &Store, json: bool) -> Result<()> {
+    use zevo_core::plugins::{PLUGINS_DIR, Plugins};
+    let dir = store.dir().join(PLUGINS_DIR);
+    let plugins = Plugins::load(store.dir());
+    let builtin = Plugins::builtin();
+    // Templates, extras and editors as id, name, description, and whether
+    // it is the one Zevo ships with.
+    let templates: Vec<_> = plugins
+        .templates
+        .iter()
+        .map(|t| {
+            (
+                &t.id,
+                &t.name,
+                &t.description,
+                builtin.template(&t.id) == Some(t),
+            )
+        })
+        .collect();
+    let extras: Vec<_> = plugins
+        .extras
+        .iter()
+        .map(|e| {
+            (
+                &e.id,
+                &e.name,
+                &e.description,
+                builtin.extra(&e.id) == Some(e),
+            )
+        })
+        .collect();
+    let editors: Vec<_> = plugins
+        .editors
+        .iter()
+        .map(|e| {
+            (
+                &e.id,
+                &e.name,
+                &e.launcher,
+                builtin.editor(&e.id) == Some(e),
+            )
+        })
+        .collect();
+
+    if json {
+        let entries = |items: &[(&String, &String, &String, bool)], third: &str| {
+            items
+                .iter()
+                .map(|(id, name, other, builtin)| {
+                    serde_json::json!({"id": id, "name": name, third: other, "builtin": builtin})
+                })
+                .collect::<Vec<_>>()
+        };
+        let out = serde_json::json!({
+            "dir": dir,
+            "templates": entries(&templates, "description"),
+            "extras": entries(&extras, "description"),
+            "editors": entries(&editors, "launcher"),
+            "hooks": plugins.hooks.iter().map(|h| serde_json::json!({
+                "command": h.command,
+                "actions": h.actions,
+            })).collect::<Vec<_>>(),
+            "checks": plugins.checks.iter().map(|c| serde_json::json!({
+                "name": c.name,
+                "command": c.command,
+            })).collect::<Vec<_>>(),
+            "issuer": plugins.issuer.as_ref().map(|i| serde_json::json!({
+                "name": i.name,
+                "command": i.command,
+                "renew_after_hours": i.renew_after_hours,
+            })),
+            "problems": plugins.problems,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    let mark = |builtin: bool| if builtin { "  (built in)" } else { "" };
+    println!("Plugins folder: {}", dir.display());
+    for (title, items) in [
+        ("Templates", &templates),
+        ("Extras", &extras),
+        ("Editors", &editors),
+    ] {
+        println!("\n{title}:");
+        for (id, name, _, builtin) in items {
+            println!("  {id:<16} {name}{}", mark(*builtin));
+        }
+    }
+    println!("\nHooks:");
+    if plugins.hooks.is_empty() {
+        println!("  none");
+    }
+    for hook in &plugins.hooks {
+        let when = if hook.actions.is_empty() {
+            "after any change".to_string()
+        } else {
+            format!("after {}", hook.actions.join(", "))
+        };
+        println!("  {}  ({when})", hook.command.join(" "));
+    }
+    println!("\nChecks:");
+    if plugins.checks.is_empty() {
+        println!("  none");
+    }
+    for check in &plugins.checks {
+        println!("  {:<16} {}", check.name, check.command.join(" "));
+    }
+    println!("\nCertificate issuer:");
+    match &plugins.issuer {
+        Some(issuer) => println!("  {:<16} {}", issuer.name, issuer.command.join(" ")),
+        None => println!("  mkcert{}", mark(true)),
+    }
+    if !plugins.problems.is_empty() {
+        println!("\nProblems:");
+        for problem in &plugins.problems {
+            println!("  {problem}");
+        }
+    }
+    Ok(())
+}
+
+/// Runs `zevo-<name>` for a command Zevo does not have, as git and cargo
+/// do, and exits with its status. The program shares the terminal and gets
+/// `ZEVO_CONFIG_DIR` (this registry) and `ZEVO_BIN` (this `zevo`).
+fn run_external(store: &Store, args: &[String]) -> Result<ExitCode> {
+    let Some((name, rest)) = args.split_first() else {
+        bail!("no command given; run `zevo --help` to see the commands");
+    };
+    let program = format!("zevo-{name}");
+    let bin = zevo_core::plugins::run::bin_dir(store.dir());
+    let found = if name.is_empty() || name.contains(['/', '\\']) {
+        None
+    } else {
+        zevo_core::programs::find(&program, std::slice::from_ref(&bin))
+    };
+    let Some(path) = found else {
+        // Most often this is a mistyped command, not a missing plugin.
+        let hint = match nearest_command(name) {
+            Some(near) => format!("Did you mean `zevo {near}`?"),
+            None => "Run `zevo --help` to see the commands.".to_string(),
+        };
+        bail!(
+            "'{name}' is not a zevo command, and no program called {program} was found on the \
+             PATH or in {}. {hint}",
+            bin.display()
+        );
+    };
+    let mut command = std::process::Command::new(&path);
+    command
+        .args(rest)
+        .env(zevo_core::store::CONFIG_DIR_ENV, store.dir());
+    if let Ok(exe) = std::env::current_exe() {
+        command.env("ZEVO_BIN", exe);
+    }
+    let status = command
+        .status()
+        .with_context(|| format!("could not run {}", path.display()))?;
+    Ok(match status.code() {
+        Some(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
+        // Stopped by a signal.
+        None => ExitCode::FAILURE,
+    })
+}
+
+/// The built-in command closest to a mistyped one, if any is close.
+fn nearest_command(typed: &str) -> Option<String> {
+    use clap::CommandFactory as _;
+    Cli::command()
+        .get_subcommands()
+        .map(|c| c.get_name().to_string())
+        .map(|name| (edit_distance(typed, &name), name))
+        .filter(|(distance, _)| *distance <= 2)
+        .min()
+        .map(|(_, name)| name)
+}
+
+/// How many single-character insertions, deletions and replacements turn
+/// `a` into `b`.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, x) in a.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, y) in b.iter().enumerate() {
+            let replace = diagonal + usize::from(x != *y);
+            diagonal = row[j + 1];
+            row[j + 1] = replace.min(diagonal + 1).min(row[j] + 1);
+        }
+    }
+    row[b.len()]
 }
 
 async fn reconcile_once(store: &Store) -> Result<Report> {
@@ -644,7 +851,7 @@ async fn reconcile_scope(store: &Store, all_hosts: bool) -> Result<Report> {
         store,
         runtime.as_ref().map(|r| r as &dyn Runtime),
         &remotes,
-        &certs::Mkcert,
+        certs::issuer(&zevo_core::plugins::Plugins::load(store.dir()), store.dir()).as_ref(),
     )
     .await?;
     if let Some(reason) = reason {
@@ -708,8 +915,14 @@ async fn cmd_setup(store: &Store, args: SetupArgs) -> Result<()> {
                 setup::MANAGED_CONTAINER
             );
             {
-                // HTTPS needs locally trusted certificates; without mkcert, use HTTP.
-                let https = match certs::Mkcert.ready() {
+                // HTTPS needs locally trusted certificates; without mkcert
+                // (or the certificate plugin), use HTTP.
+                let https = match certs::issuer(
+                    &zevo_core::plugins::Plugins::load(store.dir()),
+                    store.dir(),
+                )
+                .ready()
+                {
                     Ok(()) => true,
                     Err(reason) => {
                         eprintln!("warning: starting Traefik without HTTPS. {reason}");
@@ -892,5 +1105,94 @@ fn print_actions(report: &Report) {
 fn print_warnings(report: &Report) {
     for warning in &report.warnings {
         eprintln!("warning: {warning}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unknown_command_is_kept_with_its_arguments_for_a_zevo_program() {
+        let cli = Cli::try_parse_from(["zevo", "frobnicate", "a", "--json", "-x"]).unwrap();
+        match cli.command {
+            Command::External(args) => assert_eq!(args, ["frobnicate", "a", "--json", "-x"]),
+            _ => panic!("expected an external command"),
+        }
+        assert!(matches!(
+            Cli::try_parse_from(["zevo", "plugins"]).unwrap().command,
+            Command::Plugins
+        ));
+    }
+
+    #[test]
+    fn an_unknown_command_without_a_program_explains_itself() {
+        let tmp = tempfile_dir();
+        let err = run_external(&Store::open(&tmp), &["zevo-test-nothing-here".into()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is not a zevo command"), "{err}");
+        assert!(err.contains("zevo --help"), "{err}");
+        let err = run_external(&Store::open(&tmp), &["../x".into()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is not a zevo command"), "{err}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_external_command_gets_its_arguments_and_environment_and_its_exit_code_is_kept() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile_dir();
+        let bin = zevo_core::plugins::run::bin_dir(&tmp);
+        std::fs::create_dir_all(&bin).unwrap();
+        let program = bin.join("zevo-zevo-test-hello");
+        let out = tmp.join("out");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nprintf '%s|%s|%s\\n' \"$*\" \"$ZEVO_CONFIG_DIR\" \"$ZEVO_BIN\" > {out:?}\nexit 3\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let args = ["zevo-test-hello".to_string(), "a".into(), "--b".into()];
+        // Another test thread forking while the script was open for writing
+        // can make it briefly "busy"; try again.
+        let mut result = run_external(&Store::open(&tmp), &args);
+        for _ in 0..5 {
+            match &result {
+                Err(e) if format!("{e:#}").contains("busy") => {
+                    std::thread::sleep(Duration::from_millis(50));
+                    result = run_external(&Store::open(&tmp), &args);
+                }
+                _ => break,
+            }
+        }
+        assert_eq!(
+            format!("{:?}", result.unwrap()),
+            format!("{:?}", ExitCode::from(3))
+        );
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap(),
+            format!("a --b|{}|{}\n", tmp.display(), exe.display())
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A fresh folder; the CLI crate has no tempfile dependency.
+    fn tempfile_dir() -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "zevo-cli-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }
