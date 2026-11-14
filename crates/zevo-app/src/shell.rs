@@ -1685,6 +1685,13 @@ impl Shell {
                                         window.push_notification(e, cx);
                                     }
                                 })),
+                        )
+                        .child(
+                            Button::new("plugins-help")
+                                .small()
+                                .ghost()
+                                .label("How to write a plugin")
+                                .on_click(|_, _, cx| cx.open_url(zevo_core::plugins::DOCS_URL)),
                         ),
                     cx,
                 ))

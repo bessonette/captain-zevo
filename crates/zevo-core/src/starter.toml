@@ -1,0 +1,42 @@
+## A Captain Zevo plugin. Lines starting with "##" explain; lines starting
+## with "# " are examples: remove the "# " from the ones you want.
+##
+## After editing, run `zevo plugins` to see what was loaded, or why this file
+## was skipped. The format is described at {docs}
+## and `zevo plugins --builtin` prints what Zevo ships with, in this format.
+
+## --- A starter for `zevo new --template ruby` ---
+# [[template]]
+# id = "ruby"
+# name = "Ruby"
+# description = "Ruby 3, Rails on port 3000"
+# image = "mcr.microsoft.com/devcontainers/ruby:3"
+# port = 3000
+
+## --- An extra for `zevo new --with aws` ---
+# [[extra]]
+# id = "aws"
+# name = "AWS CLI"
+# description = "Installs the AWS CLI and keeps its login across rebuilds"
+# persist_dirs = ["aws"]
+# [extra.features]
+# "ghcr.io/devcontainers/features/aws-cli:1" = {}
+
+## --- An editor for `zevo open --editor idea` ---
+# [[editor]]
+# id = "idea"
+# name = "IntelliJ IDEA"
+# launcher = "idea"
+# macos_bundle = "IntelliJ IDEA.app"
+
+## --- A program run after a reconcile that changed something ---
+## "./" means next to this file. It gets one line of JSON on standard input.
+# [[hook]]
+# command = ["./notify.sh"]
+# actions = ["attached_project"]
+
+## --- A line in `zevo doctor` ---
+## The program prints {"level":"ok","detail":"..."} (ok, warn or fail).
+# [[check]]
+# name = "vpn"
+# command = ["./vpn-check.sh"]

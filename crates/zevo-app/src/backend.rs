@@ -519,9 +519,7 @@ impl Backend for SystemBackend {
     }
 
     fn open_plugins_folder(&self) -> Result<(), String> {
-        let dir = self.store.dir().join(zevo_core::plugins::PLUGINS_DIR);
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+        let dir = zevo_core::plugins::ensure_dir(self.store.dir()).map_err(|e| e.to_string())?;
         let opener = if cfg!(target_os = "macos") {
             "open"
         } else if cfg!(windows) {

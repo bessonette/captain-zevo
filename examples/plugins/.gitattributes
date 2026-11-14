@@ -1,0 +1,2 @@
+# The scripts are run by /bin/sh, which does not accept CRLF line endings.
+*.sh text eol=lf

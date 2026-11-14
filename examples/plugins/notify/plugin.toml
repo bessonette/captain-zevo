@@ -1,0 +1,9 @@
+# Shows a desktop notification when Zevo connects a project's container to
+# its network, which is when the project's addresses start working.
+
+[[hook]]
+# "./" means next to this file. The script must be executable.
+command = ["./notify.sh"]
+# Only run after a reconcile that did one of these. Leave `actions` out to
+# run after any reconcile that changed something.
+actions = ["attached_project"]

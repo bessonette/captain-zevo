@@ -1,0 +1,38 @@
+# JetBrains IDEs for "Open in editor". Plain data: nothing here runs until you
+# open a project with one of them.
+#
+# These open the project folder on this machine. They do not attach to the
+# project's devcontainer: the IDE runs your code with whatever is installed
+# locally, unless you set up its own devcontainer support yourself.
+#
+# Zevo looks for `launcher` on the PATH. The JetBrains Toolbox app can create
+# these commands (Settings > Tools > Shell scripts). On macOS Zevo also looks
+# inside the app bundle named by `macos_bundle`, in /Applications and
+# ~/Applications, so the Toolbox scripts are not needed there.
+#
+# None of these sets `remote`, so Zevo refuses to open a project on another
+# machine with them and says why.
+
+[[editor]]
+id = "idea"
+name = "IntelliJ IDEA"
+launcher = "idea"
+# The Community edition is "IntelliJ IDEA CE.app".
+macos_bundle = "IntelliJ IDEA.app"
+# "folder" is the default: the project folder is passed as the argument.
+kind = "folder"
+
+[[editor]]
+id = "pycharm"
+name = "PyCharm"
+launcher = "pycharm"
+# The Community edition is "PyCharm CE.app".
+macos_bundle = "PyCharm.app"
+kind = "folder"
+
+[[editor]]
+id = "goland"
+name = "GoLand"
+launcher = "goland"
+macos_bundle = "GoLand.app"
+kind = "folder"

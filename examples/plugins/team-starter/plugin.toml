@@ -1,0 +1,45 @@
+# A starter template and two extras a team might share. Plain data: nothing
+# here runs on your machine. They show up in `zevo new`, `zevo open` and the
+# app next to the ones Zevo ships with.
+#
+# Ids must be lowercase letters, digits and '-'. Reusing the id of a built-in
+# entry (such as "node" or "github-cli") replaces it instead of adding one.
+
+[[template]]
+id = "team-rails"
+name = "Rails (team)"
+description = "Ruby 3 with Rails, dev server on port 3000"
+image = "mcr.microsoft.com/devcontainers/ruby:3"
+# The route a new project starts with. Leave it out for a project that does
+# not serve anything yet.
+port = 3000
+# Set to true only if the image already has Node.js; otherwise an extra that
+# needs Node.js adds it.
+has_node = false
+
+[[extra]]
+id = "team-aws"
+name = "AWS CLI"
+description = "Installs the AWS CLI and keeps its login across rebuilds"
+# Ticked in `zevo new` unless the user unticks it.
+default = true
+# Run once, inside the container, after it is created.
+post_create = "aws --version"
+# Folders in the container's home directory to keep across rebuilds, named
+# without the leading dot: "aws" keeps ~/.aws.
+persist_dirs = ["aws"]
+# Devcontainer features to add, each with its options ({} for the defaults).
+[extra.features]
+"ghcr.io/devcontainers/features/aws-cli:1" = {}
+# Environment variables set in the container.
+[extra.container_env]
+AWS_PAGER = ""
+
+[[extra]]
+id = "team-terraform"
+name = "Terraform"
+description = "Installs Terraform and keeps its credentials across rebuilds"
+# "terraform.d" keeps ~/.terraform.d, where `terraform login` stores its token.
+persist_dirs = ["terraform.d"]
+[extra.features]
+"ghcr.io/devcontainers/features/terraform:1" = {}

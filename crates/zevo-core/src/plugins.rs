@@ -27,7 +27,56 @@ pub const PLUGINS_DIR: &str = "plugins";
 /// every request, so a program can refuse one it does not understand.
 pub const PROTOCOL: u32 = 1;
 
-const BUILTIN: &str = include_str!("builtin.toml");
+/// What Zevo ships with, as the manifest it is read from: the fullest
+/// example of the format there is.
+pub const BUILTIN: &str = include_str!("builtin.toml");
+
+/// Where the manifest format is described.
+pub const DOCS_URL: &str = "https://github.com/bessonette/captain-zevo#plugins";
+
+const STARTER: &str = include_str!("starter.toml");
+const FOLDER_README: &str = include_str!("plugins-readme.md");
+
+/// Makes sure the plugins folder exists and returns it. A folder Zevo
+/// creates gets a short README, so someone who opens it without having read
+/// anything finds out what goes there. An existing folder is left as it is:
+/// the user may have deleted the README on purpose.
+pub fn ensure_dir(config_dir: &Path) -> crate::Result<PathBuf> {
+    let dir = config_dir.join(PLUGINS_DIR);
+    if !dir.is_dir() {
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| crate::Error::io(format!("creating {}", dir.display()), e))?;
+        // Worth having, not worth failing over.
+        let _ = std::fs::write(
+            dir.join("README.md"),
+            FOLDER_README.replace("{docs}", DOCS_URL),
+        );
+    }
+    Ok(dir)
+}
+
+/// Writes a commented starting point for a plugin, `<name>/plugin.toml` in
+/// the plugins folder, and returns its path. Everything in it is commented
+/// out, so it changes nothing until edited. Never replaces a plugin.
+pub fn scaffold(config_dir: &Path, name: &str) -> crate::Result<PathBuf> {
+    crate::model::validate_slug(name)?;
+    let dir = ensure_dir(config_dir)?;
+    let folder = dir.join(name);
+    for taken in [folder.clone(), dir.join(format!("{name}.toml"))] {
+        if taken.exists() {
+            return Err(crate::Error::Other(format!(
+                "{} already exists",
+                taken.display()
+            )));
+        }
+    }
+    std::fs::create_dir_all(&folder)
+        .map_err(|e| crate::Error::io(format!("creating {}", folder.display()), e))?;
+    let path = folder.join("plugin.toml");
+    std::fs::write(&path, STARTER.replace("{docs}", DOCS_URL))
+        .map_err(|e| crate::Error::io(format!("writing {}", path.display()), e))?;
+    Ok(path)
+}
 
 /// A starter for `zevo new`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -377,6 +426,54 @@ mod tests {
         let path = dir.join(PLUGINS_DIR).join(relative);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn a_new_plugin_changes_nothing_until_its_examples_are_uncommented() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = scaffold(tmp.path(), "acme").unwrap();
+        assert_eq!(
+            path,
+            tmp.path()
+                .join(PLUGINS_DIR)
+                .join("acme")
+                .join("plugin.toml")
+        );
+        // The folder was made on the way, with its README.
+        let readme = std::fs::read_to_string(tmp.path().join(PLUGINS_DIR).join("README.md"));
+        assert!(readme.unwrap().contains(DOCS_URL));
+        assert_eq!(Plugins::load(tmp.path()), Plugins::builtin());
+
+        // With every example line uncommented it is a valid manifest that
+        // adds one of each kind.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(DOCS_URL) && !text.contains("{docs}"));
+        let live: String = text
+            .lines()
+            .map(|line| line.strip_prefix("# ").unwrap_or(line))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        std::fs::write(&path, live).unwrap();
+        let plugins = Plugins::load(tmp.path());
+        assert_eq!(plugins.problems, Vec::<String>::new());
+        assert!(plugins.template("ruby").is_some() && plugins.extra("aws").is_some());
+        assert!(plugins.editor("idea").is_some());
+        assert_eq!((plugins.hooks.len(), plugins.checks.len()), (1, 1));
+
+        // An existing plugin of that name, in either form, is never replaced.
+        assert!(scaffold(tmp.path(), "acme").is_err());
+        std::fs::write(tmp.path().join(PLUGINS_DIR).join("solo.toml"), "").unwrap();
+        assert!(scaffold(tmp.path(), "solo").is_err());
+        assert!(scaffold(tmp.path(), "Not A Name").is_err());
+    }
+
+    #[test]
+    fn an_existing_plugins_folder_is_not_given_a_readme() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(PLUGINS_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(ensure_dir(tmp.path()).unwrap(), dir);
+        assert!(!dir.join("README.md").exists());
     }
 
     #[test]

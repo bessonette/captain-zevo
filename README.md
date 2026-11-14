@@ -270,11 +270,15 @@ extras and editors Zevo comes with are defined the same way, and an entry that
 reuses one of their ids replaces it.
 
 ```sh
-zevo plugins     # where the folder is, what is loaded, and any plugin that could not be read
+zevo plugins new acme    # write a commented starting point: plugins/acme/plugin.toml
+zevo plugins             # where the folder is, what is loaded, and any plugin that could not be read
+zevo plugins --builtin   # what Zevo ships with, as a manifest to copy from
 ```
 
-`zevo plugins` creates the folder if it is not there yet. In the app, Settings
-shows the folder and opens it.
+The fastest way in is `zevo plugins new`: every kind of entry is in the file it
+writes, commented out. Complete plugins to copy are in
+[examples/plugins](examples/plugins). In the app, Settings shows the folder
+and opens it.
 
 A plugin that cannot be read is skipped and reported there, in `zevo doctor`
 and as a warning on every reconcile; it never stops Zevo from working.
