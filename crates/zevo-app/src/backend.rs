@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use zevo_core::certs::{self, Issuer as _};
+use zevo_core::certs;
 use zevo_core::health::Listening;
 use zevo_core::ide::{self, Editor};
 use zevo_core::lifecycle;
@@ -16,6 +16,7 @@ use zevo_core::model::{
     DevcontainerKind, Host, HostDetails, LOCAL_HOST_ID, Project, Route, Settings, Target,
     TraefikMode, TraefikSettings,
 };
+use zevo_core::plugins::Plugins;
 use zevo_core::reconcile::{self, ContainerState, Discovered, ProjectStatus};
 use zevo_core::register;
 use zevo_core::remote;
@@ -48,8 +49,15 @@ pub struct Snapshot {
     pub warnings: Vec<String>,
     /// Devcontainers on this machine that are not registered yet.
     pub discovered: Vec<Discovered>,
-    /// Editors installed on this machine.
+    /// Editors installed on this machine, in manifest order.
     pub editors: Vec<Editor>,
+    /// Every editor Zevo knows of, installed or not, to say what it looked
+    /// for when none is installed.
+    pub known_editors: Vec<Editor>,
+    /// Starter templates and extras "Start a new project" offers, built-ins
+    /// and plugins alike.
+    pub templates: Vec<templates::Template>,
+    pub extras: Vec<templates::Extra>,
     /// Remote hosts and whether Docker answers on each.
     pub hosts: Vec<HostView>,
 }
@@ -65,11 +73,8 @@ pub struct HostView {
 impl Snapshot {
     /// The editor "Open in editor" uses: the chosen one if it is installed,
     /// else the first installed one.
-    pub fn editor(&self) -> Option<Editor> {
-        self.settings
-            .editor
-            .filter(|e| self.editors.contains(e))
-            .or_else(|| self.editors.first().copied())
+    pub fn editor(&self) -> Option<&Editor> {
+        ide::preferred(self.settings.editor.as_deref(), &self.editors)
     }
 }
 
@@ -83,6 +88,9 @@ impl Default for Snapshot {
             warnings: Vec::new(),
             discovered: Vec::new(),
             editors: Vec::new(),
+            known_editors: Vec::new(),
+            templates: Vec::new(),
+            extras: Vec::new(),
             hosts: Vec::new(),
         }
     }
@@ -102,14 +110,14 @@ pub trait Backend: Send + Sync + 'static {
     /// proposes a project for it, without saving.
     fn draft(&self, host: &str, folder: &str) -> Result<Project, String>;
     /// Creates a new project folder from a starter template inside `parent`,
-    /// with the chosen extras (ids from `templates::EXTRAS`), and returns the
+    /// with the chosen extras (ids from `Snapshot::extras`), and returns the
     /// folder's path.
     fn create_project(
         &self,
         parent: &str,
         name: &str,
         template: &str,
-        extras: &[&'static str],
+        extras: &[String],
     ) -> Result<String, String>;
     /// Registers a remote host after checking that Docker answers on it.
     /// `docker_socket` may be empty, in which case Zevo looks for it.
@@ -128,9 +136,9 @@ pub trait Backend: Send + Sync + 'static {
     /// Starts a Zevo-managed Traefik.
     fn bootstrap(&self) -> Result<(), String>;
     /// Opens the project in the editor, attached to its devcontainer.
-    fn open_in_editor(&self, slug: &str, editor: Editor) -> Result<(), String>;
-    /// Remembers which editor "Open in editor" uses.
-    fn set_editor(&self, editor: Editor) -> Result<(), String>;
+    fn open_in_editor(&self, slug: &str, editor: &Editor) -> Result<(), String>;
+    /// Remembers which editor "Open in editor" uses, by id.
+    fn set_editor(&self, id: &str) -> Result<(), String>;
     /// Starts the project's container, building it if it does not exist.
     /// Building can take minutes.
     fn start(&self, slug: &str) -> Result<(), String>;
@@ -283,10 +291,15 @@ impl Backend for SystemBackend {
                 });
             }
 
+            let plugins = Plugins::load(self.store.dir());
+            let known_editors = plugins.editors;
             let mut snapshot = Snapshot {
                 settings,
                 runtime,
-                editors: ide::available(),
+                editors: ide::available(&known_editors),
+                known_editors,
+                templates: plugins.templates,
+                extras: plugins.extras,
                 hosts: host_views,
                 ..Snapshot::default()
             };
@@ -306,7 +319,7 @@ impl Backend for SystemBackend {
                         &self.store,
                         docker.as_ref().map(|d| d as &dyn Runtime),
                         &remotes,
-                        &certs::Mkcert,
+                        certs::issuer(&Plugins::load(self.store.dir()), self.store.dir()).as_ref(),
                     )
                     .await
                     .map_err(|e| e.to_string());
@@ -381,11 +394,12 @@ impl Backend for SystemBackend {
         parent: &str,
         name: &str,
         template: &str,
-        extras: &[&'static str],
+        extras: &[String],
     ) -> Result<String, String> {
         let parent = register::expand_home(Path::new(parent.trim()));
-        let options = templates::Options::from_ids(extras).map_err(|e| e.to_string())?;
-        templates::create(&parent, name, template, &options)
+        let plugins = Plugins::load(self.store.dir());
+        let options = templates::Options::from_ids(&plugins, extras).map_err(|e| e.to_string())?;
+        templates::create(&plugins, &parent, name, template, &options)
             .map(|folder| folder.to_string_lossy().into_owned())
             .map_err(|e| e.to_string())
     }
@@ -447,14 +461,21 @@ impl Backend for SystemBackend {
     fn bootstrap(&self) -> Result<(), String> {
         self.tokio.block_on(async {
             let docker = DockerRuntime::connect().map_err(|e| e.to_string())?;
-            setup::bootstrap(&self.store, &docker, None, certs::Mkcert.ready().is_ok())
-                .await
-                .map(|_| ())
-                .map_err(|e| e.to_string())
+            setup::bootstrap(
+                &self.store,
+                &docker,
+                None,
+                certs::issuer(&Plugins::load(self.store.dir()), self.store.dir())
+                    .ready()
+                    .is_ok(),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
         })
     }
 
-    fn open_in_editor(&self, slug: &str, editor: Editor) -> Result<(), String> {
+    fn open_in_editor(&self, slug: &str, editor: &Editor) -> Result<(), String> {
         let project = self.store.project(slug).map_err(|e| e.to_string())?;
         let host = match project.host.as_str() {
             LOCAL_HOST_ID => None,
@@ -463,9 +484,9 @@ impl Backend for SystemBackend {
         ide::open(editor, &project, host.as_ref()).map_err(|e| e.to_string())
     }
 
-    fn set_editor(&self, editor: Editor) -> Result<(), String> {
+    fn set_editor(&self, id: &str) -> Result<(), String> {
         let mut settings = self.store.settings().map_err(|e| e.to_string())?;
-        settings.editor = Some(editor);
+        settings.editor = Some(id.to_string());
         self.store
             .save_settings(&settings)
             .map_err(|e| e.to_string())
@@ -511,7 +532,7 @@ impl Backend for SystemBackend {
 pub struct DemoBackend {
     projects: Mutex<Vec<(Project, ContainerState, Option<&'static str>)>>,
     set_up: Mutex<bool>,
-    editor: Mutex<Option<Editor>>,
+    editor: Mutex<Option<String>>,
     hosts: Mutex<Vec<Host>>,
 }
 
@@ -684,7 +705,7 @@ impl Backend for DemoBackend {
     fn load(&self) -> Result<Snapshot, String> {
         let set_up = *self.set_up.lock().unwrap();
         let settings = Settings {
-            editor: *self.editor.lock().unwrap(),
+            editor: self.editor.lock().unwrap().clone(),
             traefik: set_up.then(|| TraefikSettings {
                 tls: false,
                 container_dir: None,
@@ -756,7 +777,14 @@ impl Backend for DemoBackend {
             projects: views,
             routers,
             runtime: Ok("Docker Engine 29.7 (example)".into()),
-            editors: vec![Editor::VsCode, Editor::Cursor, Editor::Zed],
+            editors: Plugins::builtin()
+                .editors
+                .into_iter()
+                .filter(|e| ["vscode", "cursor", "zed"].contains(&e.id.as_str()))
+                .collect(),
+            known_editors: Plugins::builtin().editors,
+            templates: Plugins::builtin().templates,
+            extras: Plugins::builtin().extras,
             discovered: if set_up {
                 vec![
                     Discovered {
@@ -811,7 +839,7 @@ impl Backend for DemoBackend {
         parent: &str,
         name: &str,
         _template: &str,
-        _extras: &[&'static str],
+        _extras: &[String],
     ) -> Result<String, String> {
         let slug = zevo_core::model::slugify(name);
         if slug.is_empty() {
@@ -941,12 +969,12 @@ impl Backend for DemoBackend {
         Ok(())
     }
 
-    fn open_in_editor(&self, _slug: &str, _editor: Editor) -> Result<(), String> {
+    fn open_in_editor(&self, _slug: &str, _editor: &Editor) -> Result<(), String> {
         Ok(())
     }
 
-    fn set_editor(&self, editor: Editor) -> Result<(), String> {
-        *self.editor.lock().unwrap() = Some(editor);
+    fn set_editor(&self, id: &str) -> Result<(), String> {
+        *self.editor.lock().unwrap() = Some(id.to_string());
         Ok(())
     }
 

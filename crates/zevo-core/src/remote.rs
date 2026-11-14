@@ -5,6 +5,10 @@
 //! Nothing is installed on the remote. Authentication must not need typing
 //! (keys or an agent): Zevo never prompts.
 
+// Remote hosts are not supported on Windows yet: `Tunnel::open` refuses
+// there, which leaves the code behind it unused on that platform.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};

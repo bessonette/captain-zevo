@@ -45,11 +45,10 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn finds_only_executables_including_in_extra_dirs() {
         use std::os::unix::fs::PermissionsExt;

@@ -1,0 +1,141 @@
+# What Captain Zevo ships with, in the same format as a plugin manifest.
+# A manifest in the user's plugins folder can add entries, or replace one of
+# these by reusing its id.
+
+# --- Starter templates, built on the maintained devcontainer base images ---
+
+[[template]]
+id = "node"
+name = "Node.js"
+description = "JavaScript and TypeScript, dev server on port 3000"
+image = "mcr.microsoft.com/devcontainers/javascript-node:22"
+port = 3000
+has_node = true
+
+[[template]]
+id = "python"
+name = "Python"
+description = "Python 3, dev server on port 8000"
+image = "mcr.microsoft.com/devcontainers/python:3"
+port = 8000
+
+[[template]]
+id = "rust"
+name = "Rust"
+description = "Rust toolchain, server on port 8080"
+image = "mcr.microsoft.com/devcontainers/rust:1"
+port = 8080
+
+[[template]]
+id = "go"
+name = "Go"
+description = "Go toolchain, server on port 8080"
+image = "mcr.microsoft.com/devcontainers/go:1"
+port = 8080
+
+[[template]]
+id = "php"
+name = "PHP"
+description = "PHP 8, dev server on port 8000"
+image = "mcr.microsoft.com/devcontainers/php:8"
+port = 8000
+
+[[template]]
+id = "ubuntu"
+name = "Ubuntu"
+description = "A plain Ubuntu container; add a route when you have something to serve"
+image = "mcr.microsoft.com/devcontainers/base:ubuntu"
+
+# --- Extras for a new project ---
+
+[[extra]]
+id = "claude-code"
+name = "Claude Code"
+description = "Installs Claude Code and keeps its login and history across rebuilds"
+needs_node = true
+persist_dirs = ["claude"]
+persist_files = [".claude.json"]
+[extra.features]
+"ghcr.io/anthropics/devcontainer-features/claude-code:1.0" = {}
+
+[[extra]]
+id = "codex"
+name = "Codex"
+description = "Installs OpenAI's Codex CLI and keeps its login and history across rebuilds"
+needs_node = true
+post_create = "npm install -g @openai/codex"
+persist_dirs = ["codex"]
+
+[[extra]]
+id = "docker"
+name = "Docker access"
+description = "Makes this machine's Docker available inside the container"
+# The CLI from Docker's own packages: the Moby ones are not available on
+# every base image.
+[extra.features]
+"ghcr.io/devcontainers/features/docker-outside-of-docker:1" = { moby = false }
+
+[[extra]]
+id = "github-cli"
+name = "GitHub CLI"
+description = "Installs gh"
+[extra.features]
+"ghcr.io/devcontainers/features/github-cli:1" = {}
+
+[[extra]]
+id = "shell-history"
+name = "Shell history"
+description = "Keeps command history across rebuilds"
+default = true
+state = true
+[extra.container_env]
+HISTFILE = "${containerWorkspaceFolder}/{state_dir}/shell_history"
+
+[[extra]]
+id = "address-file"
+name = "Address file"
+description = "Zevo writes the project's own hostnames to .devcontainer/zevo.env"
+default = true
+address_file = true
+
+# --- Editors ---
+
+[[editor]]
+id = "vscode"
+name = "VS Code"
+launcher = "code"
+macos_bundle = "Visual Studio Code.app"
+kind = "vscode"
+state_folder = "Code"
+
+[[editor]]
+id = "cursor"
+name = "Cursor"
+launcher = "cursor"
+macos_bundle = "Cursor.app"
+kind = "vscode"
+state_folder = "Cursor"
+
+[[editor]]
+id = "windsurf"
+name = "Windsurf"
+launcher = "windsurf"
+macos_bundle = "Windsurf.app"
+kind = "vscode"
+state_folder = "Windsurf"
+
+[[editor]]
+id = "vscodium"
+name = "VSCodium"
+launcher = "codium"
+macos_bundle = "VSCodium.app"
+kind = "vscode"
+state_folder = "VSCodium"
+
+# Zed opens the folder and offers to reopen it in the container.
+[[editor]]
+id = "zed"
+name = "Zed"
+launcher = "zed"
+macos_bundle = "Zed.app"
+remote = "ssh://{ssh}{path}"

@@ -81,6 +81,7 @@ More commands:
 | `zevo discover` | List devcontainers on this machine that are not registered yet |
 | `zevo open <slug> [--editor zed]` | Open a project in VS Code, Cursor, Windsurf, VSCodium or Zed, attached to its devcontainer |
 | `zevo doctor` | Check the runtime, Traefik, the route directory and DNS |
+| `zevo plugins` | List the starters, extras, editors and programs Zevo was extended with |
 
 Add `--json` to `ls`, `show`, `reconcile` and `doctor` for scripting.
 
@@ -174,7 +175,8 @@ zevo add --host buildbox /srv/dev/billing
 `ubuntu`. The file already declares the project's route, so it gets an address
 as soon as it is built (`zevo up <slug>`).
 
-Extras, added with `--with` or ticked in the app:
+Extras, added with `--with` or ticked in the app (more starters and extras can
+be added with [plugins](#plugins)):
 
 | Extra | What it adds |
 |---|---|
@@ -241,6 +243,135 @@ path_prefix = "/v1"
 ```
 
 Hand edits take effect on the next `zevo reconcile`.
+
+## Plugins
+
+Zevo can be extended without rebuilding it. A plugin is a TOML file in the
+`plugins` folder of the configuration directory: `plugins/<name>.toml`, or
+`plugins/<name>/plugin.toml` when it ships files of its own. The starters,
+extras and editors Zevo comes with are defined the same way, and an entry that
+reuses one of their ids replaces it.
+
+```sh
+zevo plugins     # what is loaded, and any plugin that could not be read
+```
+
+A plugin that cannot be read is skipped and reported there, in `zevo doctor`
+and as a warning on every reconcile; it never stops Zevo from working.
+
+> Programs named by a plugin run with your permissions. Zevo only reads
+> plugins from its own configuration directory, never from a project, so
+> install only ones you trust.
+
+### Starters, extras and editors
+
+These are plain data. They show up in `zevo new`, `zevo open` and the app.
+
+```toml
+# plugins/acme.toml
+[[template]]
+id = "ruby"
+name = "Ruby"
+description = "Ruby 3, Rails on port 3000"
+image = "mcr.microsoft.com/devcontainers/ruby:3"
+port = 3000             # optional: the route a new project starts with
+has_node = false        # true if the image already has Node.js
+
+[[extra]]
+id = "aws"
+name = "AWS CLI"
+description = "Installs the AWS CLI and keeps its login across rebuilds"
+default = false                  # ticked unless the user says otherwise
+needs_node = false               # adds Node.js unless the template has it
+post_create = "aws --version"    # run once after the container is created
+persist_dirs = ["aws"]           # keeps ~/.aws across rebuilds
+persist_files = []               # for files a tool rewrites in place
+[extra.features]
+"ghcr.io/devcontainers/features/aws-cli:1" = {}
+[extra.container_env]
+AWS_PAGER = ""
+
+[[editor]]
+id = "idea"
+name = "IntelliJ IDEA"
+launcher = "idea"                    # the command that starts it
+macos_bundle = "IntelliJ IDEA.app"   # optional
+```
+
+An editor is given the project folder as its argument. Two optional settings
+change that:
+
+- `kind = "vscode"`, with `state_folder` naming its folder of settings (such
+  as `Cursor`), is for VS Code forks: the project is opened attached to its
+  devcontainer.
+- `remote = "ssh://{ssh}{path}"` is the argument for a project on another
+  machine. Without it the editor refuses remote projects and says why.
+
+### Your own commands
+
+An executable called `zevo-<name>`, on the `PATH` or in `plugins/bin`, becomes
+`zevo <name>`. It receives the remaining arguments, and two environment
+variables: `ZEVO_CONFIG_DIR`, and `ZEVO_BIN` with the path of the `zevo` that
+started it, so it can call back (`"$ZEVO_BIN" ls --json`).
+
+### Programs Zevo runs
+
+A plugin can name programs for Zevo to run. A program written as `./name` is
+looked for next to the plugin's file, and so is an argument written that way
+(`["python3", "./notify.py"]`); a bare name is looked for on the `PATH` and in
+`plugins/bin`. Each one is sent a single line of JSON on its standard
+input, always including `"protocol": 1`, and gets `ZEVO_CONFIG_DIR` in its
+environment. A program that fails, prints something else or takes too long is
+stopped and reported; it does not break the command that ran it.
+
+**Hooks** run after a reconcile that changed something:
+
+```toml
+[[hook]]
+command = ["./notify.sh"]
+actions = ["attached_project", "issued_certificate"]   # leave out for any change
+```
+
+```json
+{"protocol":1,"event":"reconcile",
+ "actions":[{"action":"attached_project","slug":"shop","container":"shop-app-1"}],
+ "projects":[{"slug":"shop","state":"running","attached":true,"urls":["https://shop.localhost"]}]}
+```
+
+The actions are `wrote_routes`, `removed_orphan_routes`, `created_network`,
+`attached_traefik`, `attached_project`, `started_edge`, `wrote_edge_routes`,
+`issued_certificate` and `wrote_env_file`. What a hook prints is ignored. Hooks
+have 5 seconds, because the app reconciles every few seconds; start anything
+longer in the background (`long-task &`), which Zevo does not wait for.
+
+**Doctor checks** add a line to `zevo doctor`:
+
+```toml
+[[check]]
+name = "vpn"
+command = ["./vpn-check.sh"]
+```
+
+The program is sent `{"protocol":1,"request":"check"}` and has 10 seconds to
+print `{"level":"ok","detail":"connected"}`. The level is `ok`, `warn` or
+`fail`.
+
+**A certificate issuer** replaces mkcert, for a company certificate authority
+or step-ca:
+
+```toml
+[issuer]
+name = "step-ca"
+command = ["./issue.sh"]
+renew_after_hours = 12   # optional; a year if left out
+```
+
+It is sent `{"protocol":1,"request":"ready"}` before use, and
+`{"protocol":1,"request":"issue","names":["*.shop.localhost","shop.localhost"],"cert":"/path/cert.pem","key":"/path/key.pem"}`
+to issue: it writes the certificate and key to those two paths, and Zevo
+moves them into place once both exist. Either way it
+prints `{"ok":true}`, or `{"ok":false,"error":"what went wrong"}`. Changing
+the issuer re-issues every project's certificate on the next reconcile.
 
 ## Roadmap
 
