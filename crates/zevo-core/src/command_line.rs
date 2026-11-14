@@ -61,12 +61,55 @@ pub fn install() -> Result<Installed> {
     // it would break when the app closes.
     let copy = std::env::var_os("APPIMAGE").is_some();
     let path = install_into(&source, &dirs, copy)?;
-    let on_path = std::env::var_os("PATH").is_some_and(|all| {
-        std::env::split_paths(&all).any(|dir| Some(dir.as_path()) == path.parent())
-    });
-    let note = (!on_path && path.parent() == home.as_deref())
-        .then(|| "If a terminal does not find `zevo`, add ~/.local/bin to your PATH.".to_string());
+    let note = path_hint(&path);
     Ok(Installed { path, note })
+}
+
+/// What to tell the user when the `zevo` at `installed` may be out of a
+/// terminal's reach: it is in `~/.local/bin`, which a shell searches only
+/// if its startup file says so (macOS's zsh does not by default). `None`
+/// when it is somewhere every shell looks, or somewhere the user set up.
+///
+/// The app cannot simply look at its own PATH: started from the Finder or a
+/// launcher it does not have the shell's.
+pub fn path_hint(installed: &Path) -> Option<String> {
+    let home = directories::BaseDirs::new()?.home_dir().to_path_buf();
+    hint_for(
+        installed,
+        &home,
+        std::env::var_os("PATH").as_deref(),
+        std::env::var_os("SHELL").as_deref(),
+    )
+}
+
+fn hint_for(
+    installed: &Path,
+    home: &Path,
+    path: Option<&std::ffi::OsStr>,
+    shell: Option<&std::ffi::OsStr>,
+) -> Option<String> {
+    let dir = installed.parent()?;
+    if dir != home.join(".local/bin") {
+        return None;
+    }
+    if path.is_some_and(|all| std::env::split_paths(all).any(|d| d == dir)) {
+        return None;
+    }
+    let shell = shell.map(Path::new).and_then(Path::file_name);
+    let line = r#"export PATH="$HOME/.local/bin:$PATH""#;
+    let file = match shell.and_then(|name| name.to_str()) {
+        Some("zsh") => "~/.zshrc",
+        Some("bash") => "~/.bashrc",
+        Some("fish") => {
+            return Some(
+                "If a terminal does not find zevo, run: fish_add_path ~/.local/bin".to_string(),
+            );
+        }
+        _ => "your shell's startup file",
+    };
+    Some(format!(
+        "If a terminal does not find zevo, add this line to {file} and open a new terminal: {line}"
+    ))
 }
 
 /// Links (or copies) `source` as `zevo` into the first of `dirs` that takes
@@ -124,6 +167,42 @@ mod tests {
         std::fs::write(&path, body).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
+    }
+
+    #[test]
+    fn the_hint_is_only_for_a_folder_the_shell_may_not_search() {
+        use std::ffi::OsStr;
+        let home = Path::new("/Users/me");
+        let local = Path::new("/Users/me/.local/bin/zevo");
+        let zsh = Some(OsStr::new("/bin/zsh"));
+        // Started from the Finder: a PATH without the user's own folders.
+        let finder = Some(OsStr::new("/usr/bin:/bin"));
+
+        let hint = hint_for(local, home, finder, zsh).unwrap();
+        assert!(hint.contains("~/.zshrc"), "{hint}");
+        assert!(
+            hint.contains(r#"export PATH="$HOME/.local/bin:$PATH""#),
+            "{hint}"
+        );
+        let fish = Some(OsStr::new("/opt/homebrew/bin/fish"));
+        assert!(
+            hint_for(local, home, finder, fish)
+                .unwrap()
+                .contains("fish_add_path")
+        );
+        assert!(
+            hint_for(local, home, finder, None)
+                .unwrap()
+                .contains("your shell's startup file")
+        );
+
+        // Already searched, or installed where every shell looks: nothing to say.
+        let with_local = Some(OsStr::new("/usr/bin:/Users/me/.local/bin"));
+        assert_eq!(hint_for(local, home, with_local, zsh), None);
+        assert_eq!(
+            hint_for(Path::new("/usr/local/bin/zevo"), home, finder, zsh),
+            None
+        );
     }
 
     #[test]

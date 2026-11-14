@@ -1542,10 +1542,17 @@ impl Shell {
                 .child(field(
                     "Command line",
                     match &snapshot.command_line {
-                        CommandLine::Installed(path) => h_flex()
-                            .gap_2()
-                            .child(mono(path.display().to_string(), cx)),
-                        CommandLine::Bundled(_) => h_flex()
+                        // The hint stays on screen: a notification is gone
+                        // before anyone has opened a terminal to try.
+                        CommandLine::Installed(path) => v_flex()
+                            .gap_1()
+                            .child(mono(path.display().to_string(), cx))
+                            .when_some(zevo_core::command_line::path_hint(path), |column, hint| {
+                                column.child(
+                                    div().text_color(cx.theme().muted_foreground).child(hint),
+                                )
+                            }),
+                        CommandLine::Bundled(_) => v_flex().child(h_flex()
                             .gap_2()
                             .child(
                                 Button::new("install-command-line")
@@ -1565,8 +1572,8 @@ impl Shell {
                                 div()
                                     .text_color(cx.theme().muted_foreground)
                                     .child("Lets you run zevo in a terminal."),
-                            ),
-                        CommandLine::Missing => h_flex().gap_2().child(
+                            )),
+                        CommandLine::Missing => v_flex().child(
                             div()
                                 .text_color(cx.theme().muted_foreground)
                                 .child("Not installed, and this copy of the app came without it."),
@@ -1576,7 +1583,10 @@ impl Shell {
                 ))
                 .child(field(
                     "Plugins",
+                    // Wraps: the folder's path is long, and the button
+                    // must not be pushed off the edge of the window.
                     h_flex()
+                        .flex_wrap()
                         .gap_2()
                         .child(mono(snapshot.plugins_dir.display().to_string(), cx))
                         .child(
