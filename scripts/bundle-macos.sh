@@ -36,11 +36,14 @@ TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/zevo-target}"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 APP="dist/Captain Zevo.app"
 
-cargo build --release -p zevo-app --target-dir "$TARGET_DIR"
+cargo build --release -p zevo-app -p zevo-cli --target-dir "$TARGET_DIR"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$TARGET_DIR/release/zevo-app" "$APP/Contents/MacOS/zevo-app"
+# The command-line tool rides along; Settings in the app links it into the
+# PATH ("Install the zevo command").
+cp "$TARGET_DIR/release/zevo" "$APP/Contents/MacOS/zevo"
 cp assets/icons/icon.icns "$APP/Contents/Resources/icon.icns"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

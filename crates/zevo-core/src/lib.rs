@@ -2,6 +2,7 @@
 //! container runtime access and reconciliation. No UI dependencies.
 
 pub mod certs;
+pub mod command_line;
 pub mod devcontainer;
 pub mod doctor;
 pub mod envfile;

@@ -53,9 +53,17 @@ otherwise starts its own.
 
 ## Install
 
+The command-line tool alone:
+
 ```sh
 cargo install --path crates/zevo-cli
 ```
+
+The desktop app comes with the same `zevo` command. The `.deb` puts it on the
+`PATH`. Elsewhere, open Settings in the app and choose "Install the zevo
+command": it is linked into `/usr/local/bin` if you can write there, otherwise
+into `~/.local/bin`, without asking for a password. On Windows, add the app's
+folder to your `PATH` instead.
 
 ## Quick start
 
@@ -253,8 +261,11 @@ extras and editors Zevo comes with are defined the same way, and an entry that
 reuses one of their ids replaces it.
 
 ```sh
-zevo plugins     # what is loaded, and any plugin that could not be read
+zevo plugins     # where the folder is, what is loaded, and any plugin that could not be read
 ```
+
+`zevo plugins` creates the folder if it is not there yet. In the app, Settings
+shows the folder and opens it.
 
 A plugin that cannot be read is skipped and reported there, in `zevo doctor`
 and as a warning on every reconcile; it never stops Zevo from working.
@@ -408,7 +419,8 @@ scripts/bundle-macos.sh --install
 ```
 
 This builds `Captain Zevo.app` with its icon and copies it to `/Applications`.
-It is signed for the Mac that built it only.
+It is signed for the Mac that built it only. The `zevo` command is inside it;
+install it from the app's Settings screen.
 
 ## Development
 

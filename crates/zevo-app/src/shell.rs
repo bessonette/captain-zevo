@@ -19,6 +19,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use zevo_core::command_line::Status as CommandLine;
 use zevo_core::health::Listening;
 use zevo_core::model::{LOCAL_HOST_ID, Target};
 use zevo_core::reconcile::ContainerState;
@@ -1536,6 +1537,58 @@ impl Shell {
                                 }))
                         }))
                     },
+                    cx,
+                ))
+                .child(field(
+                    "Command line",
+                    match &snapshot.command_line {
+                        CommandLine::Installed(path) => h_flex()
+                            .gap_2()
+                            .child(mono(path.display().to_string(), cx)),
+                        CommandLine::Bundled(_) => h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("install-command-line")
+                                    .small()
+                                    .label("Install the zevo command")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        match this.backend.install_command_line() {
+                                            Ok(done) => {
+                                                window.push_notification(done, cx);
+                                                this.reload_now(cx);
+                                            }
+                                            Err(e) => window.push_notification(e, cx),
+                                        }
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Lets you run zevo in a terminal."),
+                            ),
+                        CommandLine::Missing => h_flex().gap_2().child(
+                            div()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Not installed, and this copy of the app came without it."),
+                        ),
+                    },
+                    cx,
+                ))
+                .child(field(
+                    "Plugins",
+                    h_flex()
+                        .gap_2()
+                        .child(mono(snapshot.plugins_dir.display().to_string(), cx))
+                        .child(
+                            Button::new("open-plugins")
+                                .small()
+                                .label("Open folder")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    if let Err(e) = this.backend.open_plugins_folder() {
+                                        window.push_notification(e, cx);
+                                    }
+                                })),
+                        ),
                     cx,
                 ))
                 .child(
