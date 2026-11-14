@@ -147,8 +147,9 @@ pub trait Backend: Send + Sync + 'static {
     /// Remembers which editor "Open in editor" uses, by id.
     fn set_editor(&self, id: &str) -> Result<(), String>;
     /// Makes the `zevo` command that came with the app runnable from a
-    /// terminal, and returns a sentence saying where it went.
-    fn install_command_line(&self) -> Result<String, String>;
+    /// terminal, and returns a sentence saying where it went. May wait on
+    /// the system's password prompt.
+    fn install_command_line(&self, place: command_line::Place) -> Result<String, String>;
     /// Shows the plugins folder in the system's file manager, creating it
     /// first if it does not exist.
     fn open_plugins_folder(&self) -> Result<(), String>;
@@ -507,8 +508,8 @@ impl Backend for SystemBackend {
             .map_err(|e| e.to_string())
     }
 
-    fn install_command_line(&self) -> Result<String, String> {
-        let installed = command_line::install().map_err(|e| e.to_string())?;
+    fn install_command_line(&self, place: command_line::Place) -> Result<String, String> {
+        let installed = command_line::install(place).map_err(|e| e.to_string())?;
         let mut done = format!("Installed {}.", installed.path.display());
         if let Some(note) = installed.note {
             done.push(' ');
@@ -1026,7 +1027,7 @@ impl Backend for DemoBackend {
         Ok(())
     }
 
-    fn install_command_line(&self) -> Result<String, String> {
+    fn install_command_line(&self, _place: command_line::Place) -> Result<String, String> {
         Ok("Nothing is installed with example data.".to_string())
     }
 

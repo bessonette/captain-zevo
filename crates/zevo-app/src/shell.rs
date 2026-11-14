@@ -19,7 +19,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use zevo_core::command_line::Status as CommandLine;
+use zevo_core::command_line::{Place, Status as CommandLine};
 use zevo_core::health::Listening;
 use zevo_core::model::{LOCAL_HOST_ID, Target};
 use zevo_core::reconcile::ContainerState;
@@ -204,6 +204,130 @@ impl Shell {
             });
         })
         .detach();
+    }
+
+    /// Puts the `zevo` command on the PATH, off the UI thread: it may sit
+    /// waiting on the system's password prompt.
+    fn install_command_line(&mut self, place: Place, window: &mut Window, cx: &mut Context<Self>) {
+        let backend = self.backend.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { backend.install_command_line(place) })
+                .await;
+            _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(done) => {
+                    window.push_notification(done, cx);
+                    this.reload_now(cx);
+                }
+                Err(e) => window.push_notification(e, cx),
+            });
+        })
+        .detach();
+    }
+
+    /// The Settings row for the `zevo` command: where it is, or the ways to
+    /// install it.
+    fn render_command_line(&self, snapshot: &Snapshot, cx: &mut Context<Self>) -> Div {
+        let muted = cx.theme().muted_foreground;
+        let install =
+            |id: &'static str, label: String, place: Place, cx: &mut Context<Self>| {
+                Button::new(id).small().label(label).on_click(cx.listener(
+                    move |this, _, window, cx| this.install_command_line(place, window, cx),
+                ))
+            };
+        // On macOS the folder every shell searches needs an administrator,
+        // so the choice is the user's: a password once, or a folder of their
+        // own that their shell has to be told about.
+        let asks = cfg!(target_os = "macos");
+        let system = zevo_core::command_line::SYSTEM_DIR;
+        match &snapshot.command_line {
+            CommandLine::Installed(path) => {
+                // The hint stays on screen: a notification is gone before
+                // anyone has opened a terminal to try.
+                let hint = zevo_core::command_line::path_hint(path);
+                let can_move =
+                    asks && hint.is_some() && zevo_core::command_line::bundled().is_some();
+                v_flex()
+                    .gap_1()
+                    .child(mono(path.display().to_string(), cx))
+                    .when_some(hint, |column, hint| {
+                        column.child(div().text_color(muted).child(hint))
+                    })
+                    .when(can_move, |column| {
+                        column.child(
+                            h_flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .child(install(
+                                    "move-command-line",
+                                    format!("Move to {system}"),
+                                    Place::System,
+                                    cx,
+                                ))
+                                .child(
+                                    div().text_color(muted).child(
+                                        "Every shell finds it there. Asks for your password.",
+                                    ),
+                                ),
+                        )
+                    })
+            }
+            CommandLine::Bundled(_) if asks => v_flex()
+                .gap_1()
+                .child(
+                    h_flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(install(
+                            "install-command-line",
+                            format!("Install in {system}"),
+                            Place::System,
+                            cx,
+                        ))
+                        .child(
+                            div()
+                                .text_color(muted)
+                                .child("Every shell finds it there. Asks for your password."),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(install(
+                            "install-command-line-home",
+                            "Install in ~/.local/bin".to_string(),
+                            Place::Home,
+                            cx,
+                        ))
+                        .child(
+                            div()
+                                .text_color(muted)
+                                .child("No password. You add the folder to your shell's PATH."),
+                        ),
+                ),
+            CommandLine::Bundled(_) => v_flex().child(
+                h_flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(install(
+                        "install-command-line",
+                        "Install the zevo command".to_string(),
+                        Place::Auto,
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .text_color(muted)
+                            .child("Lets you run zevo in a terminal."),
+                    ),
+            ),
+            CommandLine::Missing => v_flex().child(
+                div()
+                    .text_color(muted)
+                    .child("Not installed, and this copy of the app came without it."),
+            ),
+        }
     }
 
     /// Runs a container action in the background, marking the project busy.
@@ -1541,44 +1665,7 @@ impl Shell {
                 ))
                 .child(field(
                     "Command line",
-                    match &snapshot.command_line {
-                        // The hint stays on screen: a notification is gone
-                        // before anyone has opened a terminal to try.
-                        CommandLine::Installed(path) => v_flex()
-                            .gap_1()
-                            .child(mono(path.display().to_string(), cx))
-                            .when_some(zevo_core::command_line::path_hint(path), |column, hint| {
-                                column.child(
-                                    div().text_color(cx.theme().muted_foreground).child(hint),
-                                )
-                            }),
-                        CommandLine::Bundled(_) => v_flex().child(h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("install-command-line")
-                                    .small()
-                                    .label("Install the zevo command")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        match this.backend.install_command_line() {
-                                            Ok(done) => {
-                                                window.push_notification(done, cx);
-                                                this.reload_now(cx);
-                                            }
-                                            Err(e) => window.push_notification(e, cx),
-                                        }
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Lets you run zevo in a terminal."),
-                            )),
-                        CommandLine::Missing => v_flex().child(
-                            div()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("Not installed, and this copy of the app came without it."),
-                        ),
-                    },
+                    self.render_command_line(snapshot, cx),
                     cx,
                 ))
                 .child(field(

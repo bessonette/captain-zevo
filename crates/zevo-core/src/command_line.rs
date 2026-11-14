@@ -47,22 +47,142 @@ pub struct Installed {
     pub note: Option<String>,
 }
 
-/// Makes the bundled `zevo` runnable from a terminal: in `/usr/local/bin`
-/// if this user may write there, else in `~/.local/bin`. Never asks for a
-/// password.
-pub fn install() -> Result<Installed> {
+/// Folder every shell searches, on macOS and Linux alike. Usually only an
+/// administrator may write there.
+pub const SYSTEM_DIR: &str = "/usr/local/bin";
+
+/// Where to put the command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    /// [`SYSTEM_DIR`]. On macOS, if this user may not write there, the
+    /// system asks for an administrator's password; elsewhere it fails.
+    System,
+    /// `~/.local/bin`: never needs a password, but the shell has to be told
+    /// to search it (see [`path_hint`]).
+    Home,
+    /// [`SYSTEM_DIR`] if this user may write there, else `~/.local/bin`.
+    /// Never asks for a password.
+    Auto,
+}
+
+fn home_dir() -> Option<PathBuf> {
+    directories::BaseDirs::new().map(|d| d.home_dir().join(".local/bin"))
+}
+
+/// Makes the bundled `zevo` runnable from a terminal.
+pub fn install(place: Place) -> Result<Installed> {
     let source = bundled().ok_or_else(|| {
         Error::Other("this copy of the app did not come with the zevo command".into())
     })?;
-    let mut dirs = vec![PathBuf::from("/usr/local/bin")];
-    let home = directories::BaseDirs::new().map(|d| d.home_dir().join(".local/bin"));
-    dirs.extend(home.clone());
+    let system = PathBuf::from(SYSTEM_DIR);
+    let home = home_dir();
     // An AppImage is mounted somewhere new on every start, so a link into
     // it would break when the app closes.
     let copy = std::env::var_os("APPIMAGE").is_some();
-    let path = install_into(&source, &dirs, copy)?;
+    let path = match place {
+        Place::Auto => {
+            let dirs: Vec<PathBuf> = std::iter::once(system).chain(home).collect();
+            install_into(&source, &dirs, copy)?
+        }
+        Place::Home => install_into(&source, &home.into_iter().collect::<Vec<_>>(), copy)?,
+        Place::System => {
+            let target = system.join(PROGRAM);
+            match install_into(&source, std::slice::from_ref(&system), copy) {
+                Ok(path) => path,
+                // Something of the user's own is in the way: asking for a
+                // password would only be a way to overwrite it.
+                Err(e) if in_the_way(&target) => return Err(e),
+                Err(e) => {
+                    install_as_administrator(&source, &target).map_err(|reason| {
+                        Error::Other(match reason {
+                            Some(reason) => reason,
+                            None => e.to_string(),
+                        })
+                    })?;
+                    target
+                }
+            }
+        }
+    };
+    // A link left in the other folder by an earlier install would shadow
+    // or outlive this one.
+    if path.parent() == Some(Path::new(SYSTEM_DIR))
+        && let Some(old) = home_dir().map(|dir| dir.join(PROGRAM))
+        && std::fs::read_link(&old).is_ok_and(|to| to == source)
+    {
+        let _ = std::fs::remove_file(&old);
+    }
     let note = path_hint(&path);
     Ok(Installed { path, note })
+}
+
+/// Whether a `zevo` that is not a link sits at `target`: one the user put
+/// there, which no install replaces.
+fn in_the_way(target: &Path) -> bool {
+    std::fs::symlink_metadata(target).is_ok_and(|m| !m.file_type().is_symlink())
+}
+
+/// The shell command, run as an administrator, that links `source` as
+/// `target`. Both are quoted so that no path can add a command of its own.
+fn link_command(source: &Path, target: &Path) -> String {
+    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', r"'\''"));
+    let dir = target.parent().unwrap_or(Path::new("/"));
+    format!(
+        "/bin/mkdir -p {} && /bin/ln -sf {} {}",
+        quote(dir),
+        quote(source),
+        quote(target)
+    )
+}
+
+/// AppleScript that runs `command` after the system's own password prompt,
+/// which says `reason`.
+fn administrator_script(command: &str, reason: &str) -> String {
+    let quote = |text: &str| format!("\"{}\"", text.replace('\\', r"\\").replace('"', "\\\""));
+    format!(
+        "do shell script {} with prompt {} with administrator privileges",
+        quote(command),
+        quote(reason)
+    )
+}
+
+/// Links `source` as `target` with an administrator's rights, through the
+/// password prompt macOS shows for it. `Err(None)` where there is no such
+/// prompt (the caller reports why the plain attempt failed).
+fn install_as_administrator(
+    source: &Path,
+    target: &Path,
+) -> std::result::Result<(), Option<String>> {
+    if !cfg!(target_os = "macos") {
+        return Err(None);
+    }
+    let script = administrator_script(
+        &link_command(source, target),
+        &format!(
+            "Captain Zevo wants to add the zevo command to {}.",
+            target.parent().unwrap_or(Path::new("/")).display()
+        ),
+    );
+    let output = std::process::Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(script)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| {
+            Some(format!(
+                "could not ask for an administrator's password: {e}"
+            ))
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let said = String::from_utf8_lossy(&output.stderr);
+    // -128 is AppleScript's "the user cancelled".
+    Err(Some(if said.contains("-128") {
+        "Nothing was installed: the password prompt was cancelled.".to_string()
+    } else {
+        format!("could not install the zevo command: {}", said.trim())
+    }))
 }
 
 /// What to tell the user when the `zevo` at `installed` may be out of a
@@ -202,6 +322,40 @@ mod tests {
         assert_eq!(
             hint_for(Path::new("/usr/local/bin/zevo"), home, finder, zsh),
             None
+        );
+    }
+
+    #[test]
+    fn the_administrator_command_cannot_be_extended_by_a_path() {
+        let command = link_command(
+            Path::new("/Applications/Captain Zevo.app/Contents/MacOS/zevo"),
+            Path::new("/usr/local/bin/zevo"),
+        );
+        assert_eq!(
+            command,
+            "/bin/mkdir -p '/usr/local/bin' && /bin/ln -sf \
+             '/Applications/Captain Zevo.app/Contents/MacOS/zevo' '/usr/local/bin/zevo'"
+        );
+        // A quote in the app's path ends neither the shell word...
+        let odd = link_command(
+            Path::new("/Apps/it's \"x\"; rm -rf ~/zevo"),
+            Path::new("/usr/local/bin/zevo"),
+        );
+        assert!(
+            odd.contains(r#"'/Apps/it'\''s "x"; rm -rf ~/zevo'"#),
+            "{odd}"
+        );
+        // ...nor the AppleScript string it is passed in.
+        let script = administrator_script(&odd, "Add \"zevo\"");
+        assert!(
+            script.starts_with("do shell script \"/bin/mkdir"),
+            "{script}"
+        );
+        assert!(script.contains(r#"\"x\"; rm"#), "{script}");
+        assert!(script.contains(r#"it'\\''s"#), "{script}");
+        assert!(
+            script.ends_with(r#"with prompt "Add \"zevo\"" with administrator privileges"#),
+            "{script}"
         );
     }
 

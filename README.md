@@ -60,12 +60,19 @@ cargo install --path crates/zevo-cli
 ```
 
 The desktop app comes with the same `zevo` command. The `.deb` puts it on the
-`PATH`. Elsewhere, open Settings in the app and choose "Install the zevo
-command": it is linked into `/usr/local/bin` if you can write there, otherwise
-into `~/.local/bin`, without asking for a password. If your shell does not
-search `~/.local/bin` (zsh on macOS does not unless told to), Settings shows the
-line to add to its startup file. On Windows, add the app's
-folder to your `PATH` instead.
+`PATH`. Elsewhere, install it from the app's Settings screen:
+
+- **macOS** offers two places. `/usr/local/bin` is searched by every shell;
+  macOS asks for an administrator's password, and the only thing done with it
+  is to create that folder if needed and link `zevo` into it. `~/.local/bin`
+  needs no password, but your shell has to be told to search it; Settings
+  shows the line to add to its startup file, and offers to move the command
+  to `/usr/local/bin` later.
+- **Linux** links it into `/usr/local/bin` if you can write there, otherwise
+  into `~/.local/bin`, without asking for a password.
+- **Windows**: add the app's folder to your `PATH` instead.
+
+A `zevo` you put in either folder yourself is never replaced.
 
 ## Quick start
 
