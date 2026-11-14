@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use zevo_core::certs;
+use zevo_core::command_line;
 use zevo_core::health::Listening;
 use zevo_core::ide::{self, Editor};
 use zevo_core::lifecycle;
@@ -60,6 +61,10 @@ pub struct Snapshot {
     pub extras: Vec<templates::Extra>,
     /// Remote hosts and whether Docker answers on each.
     pub hosts: Vec<HostView>,
+    /// Folder plugin manifests are read from; it may not exist yet.
+    pub plugins_dir: PathBuf,
+    /// Whether a terminal can run `zevo`.
+    pub command_line: command_line::Status,
 }
 
 /// A remote host with its connection status.
@@ -92,6 +97,8 @@ impl Default for Snapshot {
             templates: Vec::new(),
             extras: Vec::new(),
             hosts: Vec::new(),
+            plugins_dir: PathBuf::new(),
+            command_line: command_line::Status::Missing,
         }
     }
 }
@@ -139,6 +146,13 @@ pub trait Backend: Send + Sync + 'static {
     fn open_in_editor(&self, slug: &str, editor: &Editor) -> Result<(), String>;
     /// Remembers which editor "Open in editor" uses, by id.
     fn set_editor(&self, id: &str) -> Result<(), String>;
+    /// Makes the `zevo` command that came with the app runnable from a
+    /// terminal, and returns a sentence saying where it went. May wait on
+    /// the system's password prompt.
+    fn install_command_line(&self, place: command_line::Place) -> Result<String, String>;
+    /// Shows the plugins folder in the system's file manager, creating it
+    /// first if it does not exist.
+    fn open_plugins_folder(&self) -> Result<(), String>;
     /// Starts the project's container, building it if it does not exist.
     /// Building can take minutes.
     fn start(&self, slug: &str) -> Result<(), String>;
@@ -301,6 +315,8 @@ impl Backend for SystemBackend {
                 templates: plugins.templates,
                 extras: plugins.extras,
                 hosts: host_views,
+                plugins_dir: self.store.dir().join(zevo_core::plugins::PLUGINS_DIR),
+                command_line: command_line::status(),
                 ..Snapshot::default()
             };
             let unknown = |p: &Project| ProjectStatus {
@@ -490,6 +506,37 @@ impl Backend for SystemBackend {
         self.store
             .save_settings(&settings)
             .map_err(|e| e.to_string())
+    }
+
+    fn install_command_line(&self, place: command_line::Place) -> Result<String, String> {
+        let installed = command_line::install(place).map_err(|e| e.to_string())?;
+        let mut done = format!("Installed {}.", installed.path.display());
+        if let Some(note) = installed.note {
+            done.push(' ');
+            done.push_str(&note);
+        }
+        Ok(done)
+    }
+
+    fn open_plugins_folder(&self) -> Result<(), String> {
+        let dir = self.store.dir().join(zevo_core::plugins::PLUGINS_DIR);
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else if cfg!(windows) {
+            "explorer"
+        } else {
+            "xdg-open"
+        };
+        std::process::Command::new(opener)
+            .arg(&dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("could not start {opener}: {e}"))
     }
 
     fn start(&self, slug: &str) -> Result<(), String> {
@@ -785,6 +832,8 @@ impl Backend for DemoBackend {
             known_editors: Plugins::builtin().editors,
             templates: Plugins::builtin().templates,
             extras: Plugins::builtin().extras,
+            plugins_dir: PathBuf::from("~/.config/captain-zevo/plugins"),
+            command_line: command_line::Status::Bundled(PathBuf::from("zevo")),
             discovered: if set_up {
                 vec![
                     Discovered {
@@ -975,6 +1024,14 @@ impl Backend for DemoBackend {
 
     fn set_editor(&self, id: &str) -> Result<(), String> {
         *self.editor.lock().unwrap() = Some(id.to_string());
+        Ok(())
+    }
+
+    fn install_command_line(&self, _place: command_line::Place) -> Result<String, String> {
+        Ok("Nothing is installed with example data.".to_string())
+    }
+
+    fn open_plugins_folder(&self) -> Result<(), String> {
         Ok(())
     }
 

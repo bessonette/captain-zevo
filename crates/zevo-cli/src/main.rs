@@ -628,6 +628,9 @@ async fn run(cli: Cli) -> Result<ExitCode> {
 fn cmd_plugins(store: &Store, json: bool) -> Result<()> {
     use zevo_core::plugins::{PLUGINS_DIR, Plugins};
     let dir = store.dir().join(PLUGINS_DIR);
+    // Made on first use, so the path printed below is somewhere a manifest
+    // can be dropped straight away. Not being able to is no reason to fail.
+    let _ = std::fs::create_dir_all(&dir);
     let plugins = Plugins::load(store.dir());
     let builtin = Plugins::builtin();
     // Templates, extras and editors as id, name, description, and whether

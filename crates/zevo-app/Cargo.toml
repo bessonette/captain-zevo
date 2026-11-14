@@ -24,6 +24,13 @@ identifier = "dev.captain-zevo.app"
 category = "DeveloperTool"
 description = "Give every devcontainer project a stable local address."
 out-dir = "../../dist"
+# The command-line tool ships beside the app, so the app can put it on the
+# PATH (Settings, "Install the zevo command"); the .deb installs both in
+# /usr/bin. Build it first: `cargo build --release -p zevo-cli`.
+binaries = [
+    { path = "zevo-app", main = true },
+    { path = "zevo" },
+]
 icons = [
     "../../assets/icons/icon-32.png",
     "../../assets/icons/icon-128.png",
