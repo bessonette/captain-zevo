@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="780" height="681" viewBox="0 0 780 681" role="img" aria-label="Output of zevo --help">
+<rect width="780" height="681" rx="10" fill="#161b22"/>
+<rect x="0.5" y="0.5" width="779" height="680" rx="10" fill="none" stroke="#30363d"/>
+<circle cx="22" cy="20" r="6" fill="#ff5f57"/><circle cx="42" cy="20" r="6" fill="#febc2e"/><circle cx="62" cy="20" r="6" fill="#28c840"/>
+<g font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14">
+<text y="58"><tspan x="24.0" fill="#8b93a3">$</tspan><tspan x="40.9" fill="#d6dbe4" font-weight="600">zevo --help</tspan></text>
+<text y="100"><tspan x="24.0" fill="#d6dbe4">Manage devcontainer projects and their Traefik routes</tspan></text>
+<text y="142"><tspan x="24.0" fill="#f0c674" font-weight="600">Usage:</tspan><tspan x="83.0" fill="#d6dbe4">zevo [OPTIONS] &lt;COMMAND&gt;</tspan></text>
+<text y="184"><tspan x="24.0" fill="#f0c674" font-weight="600">Commands:</tspan></text>
+<text y="205"><tspan x="40.9" fill="#7fd4c1">setup</tspan><tspan x="133.6" fill="#d6dbe4">Adopt a running Traefik or start one</tspan></text>
+<text y="226"><tspan x="40.9" fill="#7fd4c1">add</tspan><tspan x="133.6" fill="#d6dbe4">Register an existing project folder</tspan></text>
+<text y="247"><tspan x="40.9" fill="#7fd4c1">new</tspan><tspan x="133.6" fill="#d6dbe4">Create a new project folder from a starter template and register it</tspan></text>
+<text y="268"><tspan x="40.9" fill="#7fd4c1">rm</tspan><tspan x="133.6" fill="#d6dbe4">Unregister a project and remove its routes</tspan></text>
+<text y="289"><tspan x="40.9" fill="#7fd4c1">ls</tspan><tspan x="133.6" fill="#d6dbe4">List projects with their status and URLs</tspan></text>
+<text y="310"><tspan x="40.9" fill="#7fd4c1">show</tspan><tspan x="133.6" fill="#d6dbe4">Show one project, including the Traefik config generated for it</tspan></text>
+<text y="331"><tspan x="40.9" fill="#7fd4c1">route</tspan><tspan x="133.6" fill="#d6dbe4">Add or remove a route on a project</tspan></text>
+<text y="352"><tspan x="40.9" fill="#7fd4c1">reconcile</tspan><tspan x="133.6" fill="#d6dbe4">Write route files and attach project containers to the network</tspan></text>
+<text y="373"><tspan x="40.9" fill="#7fd4c1">doctor</tspan><tspan x="133.6" fill="#d6dbe4">Check that everything Zevo depends on is working</tspan></text>
+<text y="394"><tspan x="40.9" fill="#7fd4c1">discover</tspan><tspan x="133.6" fill="#d6dbe4">List devcontainers, here and on remote hosts, that are not registered yet</tspan></text>
+<text y="415"><tspan x="40.9" fill="#7fd4c1">up</tspan><tspan x="133.6" fill="#d6dbe4">Start a project's container, building it first if it does not exist</tspan></text>
+<text y="436"><tspan x="40.9" fill="#7fd4c1">down</tspan><tspan x="133.6" fill="#d6dbe4">Stop a project's container</tspan></text>
+<text y="457"><tspan x="40.9" fill="#7fd4c1">logs</tspan><tspan x="133.6" fill="#d6dbe4">Print the end of a project's container output</tspan></text>
+<text y="478"><tspan x="40.9" fill="#7fd4c1">host</tspan><tspan x="133.6" fill="#d6dbe4">Manage other machines that run project containers</tspan></text>
+<text y="499"><tspan x="40.9" fill="#7fd4c1">open</tspan><tspan x="133.6" fill="#d6dbe4">Open a project in an editor, attached to its devcontainer</tspan></text>
+<text y="520"><tspan x="40.9" fill="#7fd4c1">plugins</tspan><tspan x="133.6" fill="#d6dbe4">Show the plugins folder and what the plugins in it add</tspan></text>
+<text y="541"><tspan x="40.9" fill="#7fd4c1">help</tspan><tspan x="133.6" fill="#d6dbe4">Print this message or the help of the given subcommand(s)</tspan></text>
+<text y="583"><tspan x="24.0" fill="#f0c674" font-weight="600">Options:</tspan></text>
+<text y="604"><tspan x="74.6" fill="#7fd4c1">--json</tspan><tspan x="167.3" fill="#d6dbe4">Print machine-readable JSON where supported</tspan></text>
+<text y="625"><tspan x="40.9" fill="#7fd4c1">-h, --help</tspan><tspan x="167.3" fill="#d6dbe4">Print help</tspan></text>
+<text y="646"><tspan x="40.9" fill="#7fd4c1">-V, --version</tspan><tspan x="167.3" fill="#d6dbe4">Print version</tspan></text>
+</g>
+</svg>
