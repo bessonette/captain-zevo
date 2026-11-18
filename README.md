@@ -2,7 +2,12 @@
 
 # Captain Zevo
 
-Captain Zevo gives every devcontainer project a stable local address such as
+Captain Zevo makes it easy to keep each project, and the AI coding agent working
+on it, inside its own devcontainer. An agent contained that way sees that
+project's files and tools and not the rest of your machine, which is safer, and
+the whole setup travels with the repository to any machine that runs
+containers. What usually gets in the way is reaching the apps inside all those
+containers, so Zevo gives every project a stable local address such as
 `http://shop.localhost`, by managing [Traefik](https://traefik.io) routes for
 you. Register a project folder once; Zevo writes its Traefik config, attaches
 its container to a shared network, and keeps both in place across rebuilds. No
