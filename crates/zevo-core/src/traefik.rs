@@ -314,7 +314,8 @@ fn not_managed(path: &Path) -> Error {
 }
 
 /// Writes the project's file atomically (temp file in the same dir + rename),
-/// only if the content differs. Returns `true` if it wrote.
+/// only if the content differs. Returns `true` if it wrote. A project with no
+/// routes has no file: any it had is removed, and `true` means it was.
 ///
 /// Refuses (with an error) to overwrite an existing `zevo-<slug>.yml` that
 /// lacks the managed header. The dynamic directory must already exist.
@@ -347,6 +348,12 @@ pub fn write_project_via_edge(
 fn write_content(project: &Project, settings: &Settings, content: &str) -> Result<bool> {
     validate_slug(&project.slug)?;
     let dir = &traefik_settings(settings)?.dynamic_dir;
+    // A project with no routes gets no file. Its file would hold an empty
+    // `http:` section, which Traefik rejects, and one rejected file makes the
+    // file provider drop every other file in the directory at its next start.
+    if project.routes.is_empty() {
+        return remove_project(&project.slug, dir);
+    }
     let path = dir.join(file_name(&project.slug));
 
     if let Some(existing) = read_optional(&path)? {
@@ -882,6 +889,23 @@ http:
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         assert_eq!(names, vec!["zevo-shop.yml".to_string()]);
+    }
+
+    #[test]
+    fn a_project_without_routes_has_no_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = settings(tmp.path());
+        let path = tmp.path().join("zevo-shop.yml");
+
+        // Nothing to route: no file is written.
+        assert!(!write_project(&project("shop", vec![]), &s).unwrap());
+        assert!(!path.exists());
+
+        // Losing its last route removes the file it had.
+        assert!(write_project(&project("shop", vec![route(None, 3000)]), &s).unwrap());
+        assert!(path.exists());
+        assert!(write_project(&project("shop", vec![]), &s).unwrap());
+        assert!(!path.exists());
     }
 
     #[test]
