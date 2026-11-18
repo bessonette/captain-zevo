@@ -456,6 +456,38 @@ The app's sidebar watermark uses a one-colour drawing of the same shape,
 [assets/logo-mono.svg](assets/logo-mono.svg); redraw it to match if the logo
 changes.
 
+## Shoutouts
+
+> Far and away the best prize that life has to offer is the chance to work
+> hard at work worth doing.
+>
+> — Theodore Roosevelt
+
+Thank you to the people who push us to go above and beyond.
+
+<p>
+  <a href="https://lunarsolargroup.com/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/shoutouts/lunar-solar-group-dark.svg">
+      <img src="assets/shoutouts/lunar-solar-group.svg" alt="The Lunar Solar Group" height="28">
+    </picture>
+  </a>
+</p>
+
+[Lunar Solar Group](https://lunarsolargroup.com/) "Do good work, don't sleep" 
+
+<p>
+  <a href="https://www.mccoy.txst.edu/graduate/dba/dba-cohorts/fall-2026.html">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/shoutouts/texas-state-dark.svg">
+      <img src="assets/shoutouts/texas-state.svg" alt="Texas State University" height="48">
+    </picture>
+  </a>
+</p>
+
+The [Fall 2026 Doctor of Business Administration cohort](https://www.mccoy.txst.edu/graduate/dba/dba-cohorts/fall-2026.html)
+at the McCoy College of Business, Texas State University.
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
