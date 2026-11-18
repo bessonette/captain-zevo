@@ -8,6 +8,8 @@ you. Register a project folder once; Zevo writes its Traefik config, attaches
 its container to a shared network, and keeps both in place across rebuilds. No
 published ports, no port conflicts.
 
+<img src="assets/screenshots/app-projects.png" alt="The desktop app's project list: each project with its status, addresses, host and devcontainer type" width="100%">
+
 > **Status: early development.** The `zevo` command-line tool and the desktop
 > app (built with [GPUI](https://gpui.rs)) work for projects on the local
 > machine. Remote hosts over SSH are built but have had little real-world
@@ -75,6 +77,8 @@ The desktop app comes with the same `zevo` command. The `.deb` puts it on the
 A `zevo` you put in either folder yourself is never replaced.
 
 ## Quick start
+
+<img src="assets/screenshots/cli-help.svg" alt="Output of zevo --help, listing every command" width="720">
 
 ```sh
 zevo setup                 # adopt your Traefik, or start a managed one
@@ -424,6 +428,10 @@ app sets up Traefik on first run, adds projects from a folder, edits their
 routes, and refreshes every few seconds. `--demo --fresh` shows the first-run
 screen. On Linux it needs the libraries listed in
 [.devcontainer/devcontainer.json](.devcontainer/devcontainer.json).
+
+<img src="assets/screenshots/app-project.png" alt="A project's page in the desktop app: a warning that a port listens only on 127.0.0.1, the project's details and its addresses" width="100%">
+
+The screenshots show the example data from `--demo`.
 
 ### Installing the app on macOS
 
