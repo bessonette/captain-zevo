@@ -463,7 +463,7 @@ changes.
 >
 > — Theodore Roosevelt
 
-Thank you to the people who push me to go above and beyond.
+Thank you to the people who push us to go above and beyond.
 
 <p>
   <a href="https://lunarsolargroup.com/">
@@ -474,8 +474,7 @@ Thank you to the people who push me to go above and beyond.
   </a>
 </p>
 
-[The Lunar Solar Group](https://lunarsolargroup.com/), where the bar is always
-a little higher than last time.
+[Lunar Solar Group](https://lunarsolargroup.com/) "Do good work, don't sleep" 
 
 <p>
   <a href="https://www.mccoy.txst.edu/graduate/dba/dba-cohorts/fall-2026.html">
@@ -486,7 +485,7 @@ a little higher than last time.
   </a>
 </p>
 
-My [Fall 2026 Doctor of Business Administration cohort](https://www.mccoy.txst.edu/graduate/dba/dba-cohorts/fall-2026.html)
+The [Fall 2026 Doctor of Business Administration cohort](https://www.mccoy.txst.edu/graduate/dba/dba-cohorts/fall-2026.html)
 at the McCoy College of Business, Texas State University.
 
 ## License
